@@ -1,0 +1,26 @@
+# 内联依赖（PySide6 运行时，约 169 MB）：不入库，装依赖见 requirements.txt
+_vendor/
+
+# Python 字节码与缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 验证脚本产生的临时目录与截图产物
+_verify_tmp/
+_verify_gui_tmp/
+_verify_shots/
+
+# 重命名执行日志（含用户真实路径，绝不入库）
+_rename_logs/
+
+# 界面偏好落盘的兜底副本（runtime state，含本机绝对路径）
+gui_state.json
+
+# 编辑器 / 系统杂项
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
