@@ -62,7 +62,7 @@
 | 概念 | 代码载体 | 用户看到的说法 |
 |---|---|---|
 | 对象 / 条目 | `engine.context.Item` | 对象、条目、这一项 |
-| 扫描对象 | `FormState.selected` / `ScanOptions.selected` | 「选择…」多选、已选 N 个具体条目、拖放 |
+| 扫描对象 | `FormState.selected` / `ScanOptions.selected` | 拖放（拖入多个文件/文件夹）、已选 N 个具体条目 |
 | 规则链 | `List[Rule]` | 规则链（顺序即生效顺序） |
 | 编号作用域 | `PlanOptions.scope` | 编号范围（整批 / 每文件夹 / 每类型 / 文件夹+类型） |
 | 计划 | `engine.plan.Plan` | 预览、预览结果 |
@@ -99,8 +99,8 @@ NameCat
 
 | # | 功能点 | 实现位置 | 界面承载 |
 |---|---|---|---|
-| F1.1 | 选择根目录（可手输） | `ScanToolbar.root_edit` / `_pick()` | 输入框 + 「选择…」 |
-| F1.2 | 直选具体文件（“只要这些”） | `_pick()` → `add_paths()` → `selected` | 同一个「选择…」按钮，一次多选即可；拖放同理 |
+| F1.1 | 选择根目录（可手输） | `ScanToolbar.root_edit` / `_pick()` | 输入框 + 「选择目录…」（只选文件夹） |
+| F1.2 | 直选具体文件（“只要这些”） | `add_paths()` → `selected` | **拖放**：把文件/文件夹拖进预览卡（Qt 对话框无法同时选文件和文件夹，故不做成按钮） |
 | F1.3 | 拖放加入（文件/文件夹） | `PathDrop` → `add_paths()` | 预览卡片 + 表格（拖入高亮） |
 | F1.4 | 对象类型 6 档 | `ONLY_CHOICES` | 「对象类型」下拉 |
 | F1.5 | 递归子目录 + 深度上限 12 | `ScanOptions.recursive/max_depth` | 勾选框 + 深度 SpinBox |
@@ -780,7 +780,7 @@ extras    llm 的 instruction / lang / max_len 等
 PageHeader「重命名工作台」            [加载预设] [保存为预设]
 NoticeBar（可隐藏，四语气）
 ScanToolbar
-  ├ 行1：根目录输入 ──────────────── [选择…] [开始扫描●]
+  ├ 行1：根目录输入 ──────────────── [选择目录…] [开始扫描●]
   ├ 行2：对象类型 ▾  包含子文件夹  包含隐藏项  ▸高级筛选   已扫描 N 项
   └ 高级面板（折叠）：名称包含 / 名称排除 / 仅这些扩展名 / 排除扩展名
                      排序方式 ▾ / 递归深度 / 校验文件头 + 图片与视频扩展名提示
