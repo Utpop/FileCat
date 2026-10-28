@@ -13,6 +13,7 @@ engine.common —— 名字校验、两遍冲突检测、落盘改名、日志�
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -20,9 +21,9 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
-from . import (APP_NAME, APP_VER, LOG_DIR_NAME, LOG_SCHEMA, MAX_LOGS,
-               STATUS_TEXT, ST_ERROR, ST_OK, ST_SAME, ST_SKIP, ST_CONFLICT,
-               TEMP_PREFIX)
+from . import (APP_NAME, APP_VER, BACKUP_DIR_NAME, LOG_DIR_NAME, LOG_SCHEMA,
+               MAX_LOGS, MAX_LOGS_TOTAL, STATUS_TEXT, ST_ERROR, ST_OK, ST_SAME,
+               ST_SKIP, ST_CONFLICT, TEMP_PREFIX)
 from .rules import INVALID_NAME_CHARS, MAX_NAME_LEN, RESERVED_NAMES
 from .scan import nkey, natural_key
 
@@ -387,8 +388,9 @@ def find_temp_leftovers(root: str, max_depth: int = 8) -> List[str]:
     for dirpath, dirnames, filenames in os.walk(root):
         if dirpath.count(os.sep) - root.count(os.sep) >= max_depth:
             dirnames[:] = []
-        if LOG_DIR_NAME in dirnames:
-            dirnames.remove(LOG_DIR_NAME)
+        for skip in (LOG_DIR_NAME, BACKUP_DIR_NAME):
+            if skip in dirnames:
+                dirnames.remove(skip)
         for name in dirnames + filenames:
             if name.startswith(TEMP_PREFIX):
                 found.append(os.path.join(dirpath, name))
@@ -399,9 +401,62 @@ def find_temp_leftovers(root: str, max_depth: int = 8) -> List[str]:
 # --------------------------------------------------------------------------- #
 # 日志与撤销
 # --------------------------------------------------------------------------- #
+#
+# 日志统一放在**程序目录**下的 `Name_backup` 文件夹里（不再塞进被改名的
+# 目标目录 —— 那样会在用户的数据目录里到处留垃圾）。
+#
+# 同一个文件夹里混着各个目标目录的日志，靠两样东西区分：
+#   · 文件名里的 8 位目录指纹（`_root_hash`）—— 列表与清理都靠它，不用读 JSON；
+#   · 日志 JSON 里的 `root` 字段 —— 界面上显示"这是哪个目录的记录"。
+# 旧版本写在 `<目标目录>/_rename_logs/` 里的日志仍然认（只读兼容），
+# 这样升级不会让老用户丢掉可撤销的机会。
 
-def log_dir(root: str) -> str:
-    return os.path.join(os.path.abspath(root), LOG_DIR_NAME)
+def _root_hash(root: str) -> str:
+    """目标目录的 8 位指纹（Windows 下大小写不敏感）。"""
+    key = nkey(root or "")
+    return hashlib.sha1(key.encode("utf-8", "replace")).hexdigest()[:8]
+
+
+def _log_name(root: str, stamp: str) -> str:
+    """日志文件名：指纹在前，时间戳在后 —— 排序按时间戳走。
+
+    段数刻意比旧格式多一段（5 段），这样新旧两种文件名绝不会互相误认：
+        新： rename_<8位指纹>_<日期>_<时分秒>_<随机>.json
+        旧： rename_<日期>_<时分秒>_<随机>.json
+    """
+    return "rename_%s_%s.json" % (_root_hash(root), stamp)
+
+
+def _split_log_name(name: str) -> Tuple[str, str]:
+    """拆出 (目录指纹, 排序键)。不是本程序写的日志返回 ("", "")。
+
+    指纹必须是 8 位十六进制 —— 旧格式（`rename_<日期>_<时分秒>_<随机>.json`）
+    段数对不上，会被判成"认不出来"，免得被误分到某个目录下再被清理掉。
+    """
+    if not (name.startswith("rename_") and name.endswith(".json")):
+        return ("", "")
+    parts = name[:-len(".json")].split("_")
+    if len(parts) != 5:
+        return ("", "")
+    tag, date, clock = parts[1], parts[2], parts[3]
+    if len(tag) != 8 or any(c not in "0123456789abcdef" for c in tag.lower()):
+        return ("", "")
+    if len(date) != 8 or not date.isdigit():
+        return ("", "")
+    if len(clock) != 6 or not clock.isdigit():
+        return ("", "")
+    return (tag, date + clock)
+
+
+def log_dir(root: str = "") -> str:
+    """撤销日志的存放目录（统一的一个，跟 root 无关）。"""
+    from . import backup_dir
+    return backup_dir()
+
+
+def legacy_log_dir(root: str) -> str:
+    """旧版本把日志放在目标目录下的 `_rename_logs`（只读兼容用）。"""
+    return os.path.join(os.path.abspath(root or ""), LOG_DIR_NAME)
 
 
 def save_log(root: str, pairs: List[Tuple[str, str]], kind: str = "mixed",
@@ -409,11 +464,13 @@ def save_log(root: str, pairs: List[Tuple[str, str]], kind: str = "mixed",
              rules: Optional[list] = None, note: str = "") -> str:
     """写撤销日志。pairs 是 [(旧绝对路径, 新绝对路径)]。"""
     directory = log_dir(root)
-    os.makedirs(directory, exist_ok=True)
+    try:
+        os.makedirs(directory, exist_ok=True)
+    except OSError:
+        return ""
     # 时间戳只到微秒，同一微秒内两次落盘会互相覆盖 —— 加随机尾码兜底
-    stamp = "%s_%s" % (time.strftime("%Y%m%d_%H%M%S"),
-                       uuid.uuid4().hex[:6])
-    path = os.path.join(directory, "rename_%s.json" % stamp)
+    stamp = "%s_%s" % (time.strftime("%Y%m%d_%H%M%S"), uuid.uuid4().hex[:6])
+    path = os.path.join(directory, _log_name(root, stamp))
     data = {
         "app": APP_NAME,
         "version": APP_VER,
@@ -427,33 +484,100 @@ def save_log(root: str, pairs: List[Tuple[str, str]], kind: str = "mixed",
         "note": note,
         "pairs": [{"old": o, "new": n} for o, n in pairs],
     }
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False, indent=2)
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+    except OSError:
+        return ""
     _trim_logs(directory)
     return path
 
 
-def _trim_logs(directory: str, keep: int = MAX_LOGS) -> None:
+def _legacy_sort_key(name: str) -> str:
+    """旧格式日志（`rename_<日期>_<时分秒>_<随机>.json`）的时间排序键。"""
+    if not (name.startswith("rename_") and name.endswith(".json")):
+        return ""
+    parts = name[:-len(".json")].split("_")
+    if len(parts) != 4:
+        return ""
+    return parts[1] + parts[2] if parts[1].isdigit() and parts[2].isdigit() else ""
+
+
+def _trim_logs(directory: str, keep: int = MAX_LOGS,
+               keep_total: int = MAX_LOGS_TOTAL) -> None:
+    """清理旧日志。
+
+    同一个文件夹里混着各个目标目录的日志，所以**按目录**各留 keep 份，
+    再对总量压一道上限 —— 否则 A 目录的日志会把 B 目录的挤掉。
+    认不出来的文件（不是本程序写的）一律不动。
+    """
     try:
         files = sorted(f for f in os.listdir(directory)
                        if f.startswith("rename_") and f.endswith(".json"))
     except OSError:
         return
-    for name in files[:-keep] if len(files) > keep else []:
+    by_root: Dict[str, List[Tuple[str, str]]] = {}
+    known: List[str] = []
+    for name in files:
+        tag, order = _split_log_name(name)
+        if not tag:
+            continue                        # 认不出来的（老格式/别的程序）不参与清理
+        by_root.setdefault(tag, []).append((order, name))
+        known.append(name)
+    drop = set()
+    for _tag, items in by_root.items():
+        items.sort()
+        for _order, name in items[:-keep] if len(items) > keep else []:
+            drop.add(name)
+    # 总量兜底：超出上限时按时间从旧到新删
+    alive = [n for n in known if n not in drop]
+    if len(alive) > keep_total:
+        def order_of(name):
+            _tag, order = _split_log_name(name)
+            return order or name
+        for name in sorted(alive, key=order_of)[:len(alive) - keep_total]:
+            drop.add(name)
+    for name in drop:
         try:
             os.remove(os.path.join(directory, name))
         except OSError:
             pass
 
 
-def list_logs(root: str) -> List[str]:
+def list_logs(root: str = "") -> List[str]:
+    """列出撤销日志（按时间从旧到新排）。
+
+    root 给了 = 只列那个目标目录的；root 空 = 列出全部（各目录混在一起）。
+    旧版本留在 `<目标目录>/_rename_logs/` 里的日志也一并认，
+    这样升级不会让老用户丢掉可撤销的机会。
+    """
+    picked: List[Tuple[str, str]] = []
     directory = log_dir(root)
-    if not os.path.isdir(directory):
-        return []
-    files = [os.path.join(directory, f) for f in os.listdir(directory)
-             if f.startswith("rename_") and f.endswith(".json")]
-    files.sort()
-    return files
+    tag = _root_hash(root) if root else ""
+    try:
+        files = os.listdir(directory)
+    except OSError:
+        files = []
+    for name in files:
+        if not (name.startswith("rename_") and name.endswith(".json")):
+            continue
+        ftag, order = _split_log_name(name)
+        if tag and ftag != tag:
+            continue
+        picked.append((order or _legacy_sort_key(name) or name,
+                       os.path.join(directory, name)))
+
+    if root:
+        legacy = legacy_log_dir(root)
+        try:
+            for name in os.listdir(legacy):
+                if name.startswith("rename_") and name.endswith(".json"):
+                    picked.append((_legacy_sort_key(name) or name,
+                                   os.path.join(legacy, name)))
+        except OSError:
+            pass
+    picked.sort()
+    return [path for _order, path in picked]
 
 
 def load_log(path: str) -> dict:

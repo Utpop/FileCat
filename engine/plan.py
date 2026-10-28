@@ -18,7 +18,7 @@ engine.plan —— 从扫描结果算出新名字，并落到可执行的一批�
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from . import rules as R
@@ -132,6 +132,25 @@ def _iter_with_ctx(items, opts: PlanOptions):
         yield it, ctx
 
 
+def with_number_rule(opts: PlanOptions, chain: Sequence) -> PlanOptions:
+    """发号参数以链里的「编号」规则为准。
+
+    规则上的起始值 / 步长 / 补零宽度 / 编号范围 / 倒序是唯一的设置处；规则没写
+    的项才回落到 PlanOptions（命令行 --start/--step/--width 走这条路）。
+    """
+    rule = R.number_rule(chain)
+    if rule is None:
+        return opts
+    got = R.number_options(rule)
+    scope = got.get("scope")
+    return replace(opts,
+                   start=got.get("start", opts.start),
+                   step=got.get("step", opts.step) or 1,
+                   width=got.get("width", opts.width),
+                   scope=scope if scope in SCOPES else opts.scope,
+                   reverse=bool(got.get("reverse")) or opts.reverse)
+
+
 # --------------------------------------------------------------------------- #
 # 计算
 # --------------------------------------------------------------------------- #
@@ -142,9 +161,10 @@ def compute_names(items: Sequence, rules: Sequence = (),
     """对每个条目跑规则链，得到 new_name（不含落盘与校验）。"""
     opts = opts or PlanOptions()
     items = list(items)
+    chain = [R.normalize(r) for r in (rules or [])]
+    opts = with_number_rule(opts, chain)
     assign_numbers(items, opts)
 
-    chain = [R.normalize(r) for r in (rules or [])]
     ctxs = [NameContext(it.path, it.name, it.is_dir, it.index, it.total,
                         it.num, it.width, st=getattr(it, "st", None))
             for it in items]

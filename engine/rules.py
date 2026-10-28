@@ -61,8 +61,12 @@ RULE_KINDS = [
     ("case", "大小写", {"a": "upper/lower/title/sentence/capitalize", "b": "", "c": ""}, ""),
     ("trim", "去首尾空格与尾点", {"a": "要剥掉的字符集（默认空白）", "b": "", "c": ""}, ""),
     ("collapse", "合并重复字符", {"a": "要合并的字符（如空格）", "b": "", "c": ""}, ""),
-    ("number", "编号", {"a": "起始值（默认 1）", "b": "补零宽度", "c": "位置 prefix/suffix/before/after"},
-     "每项按分组顺序递增：起始值 + 序号 - 1；before/after 的锚点字符用 ;sep= 指定"),
+    ("number", "编号",
+     {"a": "起始值（默认 1）", "step": "步长（默认 1）", "b": "补零宽度",
+      "scope": "编号范围 global/folder/kind/folder_kind", "reverse": "倒序 1/0",
+      "c": "位置 prefix/suffix/before/after"},
+     "发号与插号都在这一条里：起始值 + 步长逐项递增，补零宽度、编号范围、"
+     "倒序也挂在本规则上；before/after 的锚点字符用 ;sep= 指定"),
     ("template", "模板", {"a": "模板原文", "b": "", "c": ""},
      "可用 {n} {name} {ext} {date} {parent} 等，见 README"),
     ("slug", "规范化为 URL 安全名", {"a": "替换成什么（默认 _）", "b": "", "c": ""}, ""),
@@ -73,8 +77,11 @@ RULE_KINDS = [
      "去非法字符、去尾随空格与点、防保留名"),
     ("move", "移动字符位置", {"a": "从第几个字符起", "b": "取几个", "c": "插到第几个位置"}, ""),
     ("pad_numbers", "数字补零", {"a": "宽度", "b": "填充字符（默认 0）", "c": ""}, ""),
-    ("serialize", "序列化编号", {"a": "起始值（默认 1）", "b": "位数", "c": "位置 prefix/suffix"},
-     "与 number 等价，保留 ReNamer 的叫法，同样逐项递增"),
+    ("renumber", "音视频文件序列化",
+     {"a": "起始值（默认 1）", "step": "步长（默认 1）", "b": "补零宽度（默认 4）",
+      "scope": "编号范围（默认 folder）", "reverse": "倒序 1/0"},
+     "整个名字换成序号，扩展名原样保留：默认四位、每个文件夹各自从 0001 起，"
+     "适合照片 / 音视频批量序列化"),
     ("randomize", "随机化", {"a": "随机串长度", "b": "字符集（默认 0-9a-z）", "c": "位置 prefix/suffix"}, ""),
     ("date_insert", "插入日期", {"a": "日期风格 yyyy-mm-dd", "b": "", "c": "位置 prefix/suffix"},
      "默认取文件修改时间"),
@@ -106,7 +113,7 @@ CLI_ALIASES = {
     "lower": "case_lower", "upper": "case_upper", "title": "case_title",
     "case-sentence": "case_sentence", "sentence": "case_sentence",
     "trim": "trim", "insert": "insert", "delete": "delete",
-    "number": "number", "serialize": "serialize", "seq": "number",
+    "number": "number", "serialize": "number", "seq": "number",   # serialize 已并入 number
     "slug": "slug", "translit": "translit", "hash": "hash",
     "clean": "filename_clean", "filename-clean": "filename_clean",
     "move": "move", "pad": "pad_numbers", "pad-numbers": "pad_numbers",
@@ -121,6 +128,10 @@ RESERVED_NAMES = {"con", "prn", "aux", "nul",
                   *(f"com{i}" for i in range(1, 10)),
                   *(f"lpt{i}" for i in range(1, 10))}
 MAX_NAME_LEN = 255
+
+# 编号范围的短说法（describe 用；完整说法在 plan.SCOPE_TEXT）
+_SCOPE_SHORT = {"folder": "每文件夹重新编号", "kind": "每类型重新编号",
+                "folder_kind": "每文件夹每类型"}
 
 
 # --------------------------------------------------------------------------- #
@@ -158,9 +169,17 @@ class Rule:
         if self.kind in ("insert",):
             head = "%s @%s" % (name, self.a or "suffix")
             params = [p for p in (self.b, self.c) if p]
-        elif self.kind == "number":
-            head = name
-            params = [p for p in (self.a, self.b, self.c) if p]
+        elif self.kind in ("number", "renumber"):
+            # 号码的位置才是「编号」的语义；「序列化」整名就是号码
+            if self.kind == "number":
+                pos = {"prefix": "名字前面", "suffix": "名字后面",
+                       "before": "锚点之前", "after": "锚点之后"}.get(
+                           (self.c or "prefix").strip().lower(), "名字前面")
+                head = "%s @%s" % (name, pos)
+            else:
+                head = ""      # 序列化：名字就在标题里，副标题只留给参数
+            body = " ".join(self._number_bits())
+            return (head + (" " + body if body else "") + scope).strip()
         else:
             head = name
             params = [str(p) for p in (self.a, self.b, self.c) if p != "" and p is not None]
@@ -168,6 +187,24 @@ class Rule:
         return (head + (" " + body if body else "") + scope).strip()
 
     # ---- 序列化 ----
+    def _number_bits(self) -> list:
+        """发号参数的一串短说明（编号 / 序列化共用）。"""
+        ex = self.extras or {}
+        bits = []
+        if self.a not in ("", None):
+            bits.append("起始 %s" % self.a)
+        step = str(ex.get("step") or "").strip()
+        if step and step != "1":
+            bits.append("步长 %s" % step)
+        if self.b not in ("", None, "0"):
+            bits.append("补零 %s 位" % self.b)
+        scope = str(ex.get("scope") or "").strip()
+        if scope and scope != "global":
+            bits.append(_SCOPE_SHORT.get(scope, scope))
+        if str(ex.get("reverse") or "").strip().lower() not in ("", "0", "false"):
+            bits.append("倒序")
+        return bits
+
     def to_dict(self) -> dict:
         return {"id": self.id, "kind": self.kind, "a": self.a, "b": self.b,
                 "c": self.c, "enabled": bool(self.enabled),
@@ -222,6 +259,53 @@ def normalize(rule: Rule) -> Rule:
 
 def make_rule(kind: str, a: str = "", b: str = "", c: str = "", **kw) -> Rule:
     return normalize(Rule(kind=kind, a=a, b=b, c=c, **kw))
+
+
+# --------------------------------------------------------------------------- #
+# 编号规则的发号参数
+# --------------------------------------------------------------------------- #
+
+def number_options(rule) -> dict:
+    """从「编号」规则上取出计划层要用的发号参数。
+
+    起始值 / 步长 / 补零宽度 / 编号范围 / 倒序只挂在规则自己身上（同一条规则既
+    发号又插号，没有第二个入口）。空值表示「不指定」，交给 PlanOptions 的默认值。
+    """
+    out: dict = {}
+    a = str(getattr(rule, "a", "") or "").strip()
+    if a:
+        try:
+            out["start"] = int(a)
+        except ValueError:
+            pass
+    ex = getattr(rule, "extras", None) or {}
+    step = str(ex.get("step") or "").strip()
+    if step:
+        try:
+            out["step"] = int(step)
+        except ValueError:
+            pass
+    b = str(getattr(rule, "b", "") or "").strip()
+    if b:
+        try:
+            out["width"] = max(0, int(b))
+        except ValueError:
+            pass
+    scope = str(ex.get("scope") or "").strip()
+    if scope:
+        out["scope"] = scope
+    if str(ex.get("reverse") or "").strip().lower() not in ("", "0", "false", "no"):
+        out["reverse"] = True
+    return out
+
+
+def number_rule(rules):
+    """链里第一条启用的发号规则（编号 / 序列化）；没有就返回 None。"""
+    for rule in rules or ():
+        if getattr(rule, "kind", "") in ("number", "renumber") \
+                and getattr(rule, "enabled", True):
+            return rule
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -366,6 +450,24 @@ def _insert(text: str, where: str, anchor: str, payload: str) -> str:
     return text
 
 
+def _digits(rule, num, width) -> str:
+    """号码 + 补零。
+
+    号码（起始值 / 步长 / 编号范围 / 倒序）由计划层按本规则算好后传进来，
+    这里只决定宽度——再叠加一次起始值就会把起始值算两遍。
+    """
+    try:
+        k = int(num) if num is not None else 1
+    except (TypeError, ValueError):
+        k = 1
+    b = str(getattr(rule, "b", "") or "").strip()
+    try:
+        w = int(b) if b else (width or 0)
+    except (TypeError, ValueError):
+        w = width or 0
+    return tpl._num_text(k, max(0, w))
+
+
 def transform(rule: Rule, text: str, num: int = 1, width: int = 1,
               ctx=None, index=None) -> str:
     """对已经切好的片段应用规则本身（不含 selector / 扩展名保护）。"""
@@ -437,23 +539,8 @@ def transform(rule: Rule, text: str, num: int = 1, width: int = 1,
         if not a:
             return text
         return re.sub("(?:%s)+" % re.escape(a), a, text)
-    if kind in ("number", "serialize"):
-        # a=起始值  b=补零宽度  c=位置  anchor=字符集（;sep=）
-        # 递增靠计划编号：第 k 项得到 start + k - 1。
-        # （旧实现把 a 当成「固定编号」，导致 --rule number=1 让所有项都叫 01）
-        try:
-            start = int(a) if str(a).strip() else 1
-        except (TypeError, ValueError):
-            start = 1
-        try:
-            w = int(b) if str(b).strip() else (width or 0)
-        except (TypeError, ValueError):
-            w = width or 0
-        try:
-            k = int(num) if num is not None else 1
-        except (TypeError, ValueError):
-            k = 1
-        digits = tpl._num_text(start + k - 1, w)
+    if kind == "number":
+        digits = _digits(rule, num, width)
         anchor = (rule.charset or "").strip()
         pos = (c or "prefix").strip().lower()
         if pos == "suffix":
@@ -465,6 +552,9 @@ def transform(rule: Rule, text: str, num: int = 1, width: int = 1,
             i = text.find(anchor) + len(anchor)
             return text[:i] + digits + text[i:]
         return digits + text
+    if kind == "renumber":
+        # 整个名字就是号码；扩展名由 apply_chain 原样找回
+        return _digits(rule, num, width)
     if kind == "template":
         return tpl.render(a, ctx, num=num, width=width)
     if kind == "slug":
@@ -626,6 +716,15 @@ def apply_chain(rules, text: str, num: int = 1, width: int = 1, ctx=None,
             # LLM 给的是「名字主干」，扩展名必须原样保留
             stem = apply_rule(rule, stem, num, width, ctx, index)
             continue
+        if rule.kind == "renumber":
+            # 序列化：整名换成号码，扩展名原样保留。没有 ctx 的兼容入口（以及
+            # 文件夹）进来时扩展名还没拆过，这里补一次，否则 .mp4 会被一起吃
+            if split_ext and is_dir is not False:
+                core, tail = _split_ext(stem + ext)
+                if core and tail:
+                    stem, ext = core, tail
+            stem = apply_rule(rule, stem, num, width, ctx, index)
+            continue
         if rule.skip_ext and ext:
             stem = apply_rule(rule, stem, num, width, ctx, index)
             continue
@@ -648,6 +747,19 @@ def rules_to_json(rules) -> list:
     return [normalize(r).to_dict() for r in (rules or [])]
 
 
+def _as_dict(value) -> dict:
+    """只认真正的映射。手工改过的预设里 `plan: 3` 这类脏值一律当空字典，
+    免得 json.load 成功却在构造对象时炸出一串看不懂的 traceback。"""
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _as_text(value, default: str = "") -> str:
+    """非字符串的字段（JSON 里写成数字/null）统一转成文本。"""
+    if value is None:
+        return default
+    return str(value)
+
+
 def rules_from_json(data) -> list:
     out = []
     for d in data or []:
@@ -658,13 +770,16 @@ def rules_from_json(data) -> list:
         except (TypeError, ValueError):
             occ = 1
         out.append(normalize(Rule(
-            kind=d.get("kind", "replace"), a=d.get("a", ""), b=d.get("b", ""),
-            c=d.get("c", ""), enabled=bool(d.get("enabled", True)),
-            id=d.get("id", ""), selector=d.get("selector", "text") or "text",
-            charset=d.get("charset", "") or "", occurrence=occ,
+            kind=_as_text(d.get("kind", "replace"), "replace"),
+            a=d.get("a", ""), b=d.get("b", ""), c=d.get("c", ""),
+            enabled=bool(d.get("enabled", True)),
+            id=_as_text(d.get("id", ""), ""),
+            selector=_as_text(d.get("selector") or "text", "text"),
+            charset=_as_text(d.get("charset") or "", ""),
+            occurrence=occ,
             skip_ext=bool(d.get("skip_ext", False)),
             keep_sep=bool(d.get("keep_sep", False)),
-            extras=dict(d.get("extras") or {}))))
+            extras=_as_dict(d.get("extras") or {}))))
     return out
 
 

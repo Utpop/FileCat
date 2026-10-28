@@ -10,9 +10,8 @@ from engine import appdata_dir
 
 DEFAULTS = {
     "last_root": "",
-    "llm_provider": "",
-    "llm_model": "",
-    "llm_batch": 0,
+    # 被用户删掉的内置预设名（内置预设是代码里的，删除=记名单隐藏，可随时恢复）
+    "deleted_builtin": [],
 }
 FORBIDDEN = ("api_key", "apikey", "key", "token", "secret", "password")
 

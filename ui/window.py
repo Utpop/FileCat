@@ -8,7 +8,10 @@ ui.window —— 主窗口：顶栏 + 侧栏 + 页面栈 + 状态栏。
 
 from __future__ import annotations
 
+import os
+
 from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QInputDialog, QLabel, QMainWindow,
                                QPushButton, QStackedWidget, QVBoxLayout,
                                QWidget)
@@ -16,14 +19,17 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QInputDialog, QLabel, QMainW
 from adapters import engine_adapter as A
 from ui import prefs as P
 from ui.base import (C, F, HEADER_H, STATUS_H, SIDEBAR_W, WIN_H, WIN_W, Button,
-                     Elided, Label, NavButton, hbox, icon, svg_pixmap, vbox)
+                     Elided, Label, LlmBubble, NavButton, hbox, icon, svg_pixmap,
+                     vbox)
 from ui.pages.history import HistoryPage
 from ui.pages.llm_settings import LlmPage
 from ui.pages.presets import PresetsPage
+
+PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 from ui.pages.workspace import WorkspacePage
 
 NAV = [("workspace", "重命名工作台"), ("preset", "预设"),
-       ("history", "执行记录"), ("spark", "LLM 设置")]
+       ("history", "执行记录"), ("spark", "供应商配置")]
 
 QSS = """
 #Root { background: %(white)s; }
@@ -39,11 +45,28 @@ QPushButton:disabled { color: %(t4)s; background: %(white)s; }
 QPushButton#BtnPrimary { background: %(t1)s; border-color: %(t1)s; color: #FFFFFF; }
 QPushButton#BtnPrimary:hover { background: #2A2A2A; border-color: #2A2A2A; }
 QPushButton#BtnPrimary:disabled { background: %(t4)s; border-color: %(t4)s; color: #FFFFFF; }
+QPushButton#BtnCta { background: %(brand)s; border: 1px solid %(brand)s; color: #FFFFFF;
+                     border-radius: 8px; padding: 0 15px 0 12px; }
+QPushButton#BtnCta:hover { background: %(brand_hi)s; border-color: %(brand_hi)s; }
+QPushButton#BtnCta:pressed { background: %(brand_lo)s; border-color: %(brand_lo)s; }
+QPushButton#BtnCta:disabled { background: %(brand_off)s; border-color: %(brand_off)s;
+                              color: #FFFFFF; }
 QPushButton#BtnSm { border-radius: 5px; padding: 0 9px; }
+QPushButton#BtnSmSoft { border-radius: 6px; padding: 0 10px 0 8px; color: %(t1)s;
+                        background: %(s2)s; border: 1px solid transparent; }
+QPushButton#BtnSmSoft:hover { background: %(sel)s; }
+QPushButton#BtnSmSoft:disabled { background: %(s1)s; color: %(t4)s; }
+QPushButton#BtnSmBrand { border-radius: 5px; padding: 0 9px;
+                         color: %(brand)s; border-color: %(brand_off)s; background: %(white)s; }
+QPushButton#BtnSmBrand:hover { background: %(info_bg)s; border-color: %(brand)s; }
 QPushButton#BtnMid { border-radius: 5px; padding: 0 10px; }
 
 #Card { background: %(white)s; border: 1px solid %(line)s; border-radius: 6px; }
-#OptBar { background: %(s1)s; border: 1px solid %(line)s; border-radius: 6px; }
+#LlmBubble { background: %(white)s; border: 1px solid %(line)s; border-radius: 8px; }
+#Card[dropActive="true"] { border-color: %(brand)s; background: #F7F9FF; }
+#DropZone { background: #F7F7F7; border: 1px solid %(line)s; border-radius: 8px; }
+#ListZone { background: #F7F7F7; border: 1px solid %(line)s; border-radius: 8px; }
+#ListZone[empty="true"] { background: %(white)s; }
 #Input { background: %(white)s; border: 1px solid %(line2)s; border-radius: 4px; }
 #Select { background: %(white)s; border: 1px solid %(line2)s; border-radius: 4px; }
 #Select:hover { border-color: %(t3)s; }
@@ -52,9 +75,9 @@ QPushButton#BtnMid { border-radius: 5px; padding: 0 10px; }
 #PRow { background: transparent; }
 #PRow:hover { background: %(s1)s; }
 #RuleRow { background: transparent; border-radius: 5px; }
-#RuleRow:hover { background: %(s1)s; }
-#RuleRow[selected="true"] { background: %(s2)s; }
-#RuleRow[selected="true"]:hover { background: #EFEFEF; }
+#RuleRow:hover { background: %(white)s; }
+#RuleRow[selected="true"] { background: %(brand_soft)s; }
+#RuleRow[selected="true"]:hover { background: %(brand_soft_hi)s; }
 #DirBar { background: %(s1)s; border: 1px solid %(line)s; border-radius: 6px; }
 #HelpBtn { border: 0; background: transparent; border-radius: 15px; padding: 0; }
 #HelpBtn:hover { background: %(s2)s; }
@@ -103,6 +126,7 @@ class MainWindow(QMainWindow):
         self._wire()
         self._restore()
         self._goto(0)
+        self.refresh_llm_bubble()
 
     # ---------------- 顶栏 ----------------
     def _header(self):
@@ -114,6 +138,10 @@ class MainWindow(QMainWindow):
         logo = QLabel()
         logo.setPixmap(svg_pixmap("cat", C["t1"], 26))
         logo.setFixedSize(26, 26)
+        _app_icon = os.path.join(PROJECT, "assets", "app_icon.png")
+        if os.path.isfile(_app_icon):
+            logo.setPixmap(QPixmap(_app_icon).scaled(
+                26, 26, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         lay.addWidget(logo, 0, Qt.AlignVCenter)
         lay.addWidget(Label("NameCat", 15, 600, C["t1"], -0.1), 0, Qt.AlignVCenter)
         ver = QLabel("v%s" % A.APP_VER)
@@ -149,8 +177,9 @@ class MainWindow(QMainWindow):
             lay.addWidget(b)
             self.nav.append(b)
         lay.addStretch(1)
-        lay.addWidget(NavButton("left", "收起侧栏", height=32, size=12, icon_size=16,
-                                muted=True, checkable=False))
+        # 左下角的 LLM 状态气泡：塞在侧栏底部（导航项下面、状态栏上面）
+        self.llm_bubble = LlmBubble()
+        lay.addWidget(self.llm_bubble)
         return side
 
     # ---------------- 状态栏 ----------------
@@ -174,6 +203,31 @@ class MainWindow(QMainWindow):
         self.page_ws.load_preset_requested.connect(lambda: self._goto(1))
         self.page_ws.save_preset_requested.connect(self.save_preset)
         self.page_llm.saved.connect(self._remember)
+        self.page_llm.status_changed.connect(self.refresh_llm_bubble)
+
+    # ---------------- LLM 状态气泡 ----------------
+    def goto_llm_page(self):
+        """气泡被点开：跳到「供应商配置」页。"""
+        self._goto(3)
+
+    def refresh_llm_bubble(self):
+        """按引擎里的真实连接状态刷新左下角气泡。"""
+        snap = A.llm_status()
+        state = str(snap.get("state") or "unset")
+        model = str(snap.get("model") or "")
+        if state == "ok":
+            avg = int(snap.get("average_ms") or snap.get("latency_ms") or 0)
+            detail = "已连接 · 平均 %d ms" % avg if avg else "已连接"
+        elif state == "error":
+            detail = str(snap.get("message") or "连接失败")
+            detail = detail[:28] + "…" if len(detail) > 28 else detail
+        elif model:
+            # 配了模型但还没测过 —— 不能说"已连接"，也不能说"没配置"
+            state = "unknown"
+            detail = "已配置，尚未测试"
+        else:
+            detail = "去「供应商配置」里设置"
+        self.llm_bubble.set_state(state, model, detail)
 
     def _goto(self, index):
         self.stack.setCurrentIndex(index)
@@ -182,15 +236,19 @@ class MainWindow(QMainWindow):
         if index == 1:
             self.page_presets.reload()
         elif index == 2:
-            if not self.page_history._root:
-                self.page_history.set_root(self.workspace_root())
+            self.page_history.reload()
         elif index == 3:
             self.page_llm.reload(False)
+        self.refresh_llm_bubble()
         self._remember()
 
     # ---------------- 跨页契约 ----------------
     def llm_overrides(self):
-        return self.page_llm.overrides()
+        """工作台用的接入配置：直接拿 LLM 页上这一份（含未保存的修改）。"""
+        return self.page_llm.client_config()
+
+    def llm_client(self):
+        return A.llm_client_config(self.llm_overrides())
 
     def workspace_root(self) -> str:
         return str(getattr(self.page_ws.state, "root", "") or "")
@@ -224,8 +282,8 @@ class MainWindow(QMainWindow):
             "工作流：选择目录 → 扫描 → 加规则 → 生成预览 → 执行。\n"
             "预览只算新名字，不落盘；执行会写撤销日志，可在「执行记录」撤回。\n\n"
             "快捷键：F5 重新扫描 · Ctrl+Enter 生成预览 · Ctrl+1…4 切页\n\n"
-            "预设目录：%s\n撤销日志：<目标目录>\\_rename_logs\n要求文件：%s"
-            % (A.APP_VER, A.preset_dir(), A.llm_instruction_path()))
+            "预设目录：%s\n撤销日志：%s\n要求文件：%s"
+            % (A.APP_VER, A.preset_dir(), A.backup_dir(), A.llm_instruction_path()))
 
     # ---------------- 偏好 ----------------
     def _restore(self):
@@ -237,12 +295,8 @@ class MainWindow(QMainWindow):
         self.show_status("就绪")
 
     def _remember(self):
-        provider, model, batch = self.llm_overrides()
         self._prefs.update({
             "last_root": self.workspace_root(),
-            "llm_provider": provider,
-            "llm_model": model,
-            "llm_batch": int(batch or 0),
         })
         P.save(self._prefs)
 

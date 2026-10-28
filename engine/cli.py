@@ -86,9 +86,12 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--limit", type=int, default=60,
                         help="预览显示条数，0 = 全部（默认 60）")
         sp.add_argument("--quiet", "-q", action="store_true", help="不显示进度")
-        sp.add_argument("--start", type=int, default=1, help="编号起始值")
-        sp.add_argument("--width", type=int, default=0, help="编号补零宽度")
-        sp.add_argument("--step", type=int, default=1, help="编号步长")
+        sp.add_argument("--start", type=int, default=1,
+                        help="编号起始值（链里有 number 规则时以规则上的为准）")
+        sp.add_argument("--width", type=int, default=0,
+                        help="编号补零宽度（同上，规则写了补零就用规则的）")
+        sp.add_argument("--step", type=int, default=1,
+                        help="编号步长（同上，规则写了步长就用规则的）")
         sp.add_argument("--scope", default=P.SCOPE_GLOBAL, choices=P.SCOPES,
                         help="编号分组方式")
         sp.add_argument("--no-split-ext", action="store_true",
@@ -113,7 +116,8 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--rule", action="append", default=[])
 
     un = sub.add_parser("undo", help="按日志撤销")
-    un.add_argument("root", nargs="?", default="", help="目标目录（找最新日志）")
+    un.add_argument("root", nargs="?", default="",
+                    help="目标目录（只找这个目录的日志；不给则用最新一份）")
     un.add_argument("--log", default="", help="指定日志文件")
     un.add_argument("--list", action="store_true", help="只列日志")
     un.add_argument("--quiet", "-q", action="store_true")
@@ -140,9 +144,14 @@ def _make_plan_options(args) -> P.PlanOptions:
 
 
 def _make_client(args):
-    """按命令行 + 环境变量造 LLM 客户端；没配 key 时返回不可用客户端。"""
+    """按命令行 + 环境变量造 LLM 客户端；没配 key 时返回不可用客户端。
+
+    界面里保存过的供应商配置同样生效（界面与命令行共用同一套配置），
+    命令行参数优先级最高。
+    """
     from . import llm as L
-    cfg = L.LLMConfig.from_env()
+    from . import provider as PRV
+    cfg = PRV.effective_config()
     prov = (getattr(args, "llm_provider", "") or "").strip()
     if prov:
         cfg.provider = prov
@@ -250,8 +259,8 @@ def cmd_undo(args) -> int:
     elif args.root:
         logs = C.list_logs(args.root)
     else:
-        print("请给出目录或 --log")
-        return 2
+        # 不给目录 = 列出全部（所有目标目录的日志都存在同一个文件夹里）
+        logs = C.list_logs("")
     if not logs:
         print("没有找到撤销日志")
         return 1
@@ -262,8 +271,9 @@ def cmd_undo(args) -> int:
             except (OSError, ValueError):
                 print("%s（无法读取）" % path)
                 continue
-            print("%s  %s  共 %d 项" % (path, data.get("time", ""),
-                                        len(data.get("pairs") or [])))
+            print("%s  %s  %s  共 %d 项"
+                  % (path, data.get("time", ""), data.get("root", ""),
+                     len(data.get("pairs") or [])))
         return 0
     latest = logs[-1]
     print("撤销：%s" % latest)

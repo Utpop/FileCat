@@ -14,6 +14,7 @@ _verify_shots/
 
 # 重命名执行日志（含用户真实路径，绝不入库）
 _rename_logs/
+Name_backup/
 
 # 界面偏好落盘的兜底副本（runtime state，含本机绝对路径）
 gui_state.json

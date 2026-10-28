@@ -29,6 +29,17 @@ def _safe_name(name: str) -> str:
     return out or "未命名预设"
 
 
+def _as_dict(value) -> Dict:
+    """手改过的预设里 `plan: 3` 这类脏字段当空字典处理，读取不炸。"""
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _as_text(value, default: str = "") -> str:
+    if value is None:
+        return default
+    return str(value)
+
+
 @dataclass
 class Preset:
     name: str = "未命名预设"
@@ -48,11 +59,11 @@ class Preset:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Preset":
-        return cls(name=d.get("name") or "未命名预设",
+        return cls(name=_as_text(d.get("name") or "") or "未命名预设",
                    rules=R.rules_from_json(d.get("rules") or []),
-                   scan=dict(d.get("scan") or {}),
-                   plan=dict(d.get("plan") or {}),
-                   note=d.get("note") or "")
+                   scan=_as_dict(d.get("scan") or {}),
+                   plan=_as_dict(d.get("plan") or {}),
+                   note=_as_text(d.get("note") or ""))
 
     def scan_options(self, **over) -> ScanOptions:
         data = dict(self.scan or {})

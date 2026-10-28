@@ -81,7 +81,7 @@ def _run(argv: Optional[List[str]] = None) -> int:
     if os.path.isfile(icon_path):
         app.setWindowIcon(QIcon(icon_path))
 
-    # 字体：HarmonyOS Sans SC（可变字体，400/500/600 取真实字重）
+    # 字体：系统自带 UI 字体（不再随包分发字体文件，见 ui/base.load_fonts）
     base.FAMILY = base.load_fonts()
     app.setFont(base.F(12, 400))
 

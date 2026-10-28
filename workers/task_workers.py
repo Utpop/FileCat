@@ -120,3 +120,13 @@ def logs_task(root) -> BaseTask:
 
 def leftovers_task(root) -> BaseTask:
     return BaseTask(lambda progress=None: A.temp_leftovers(root))
+
+
+def llm_test_task(cfg) -> BaseTask:
+    """测供应商连通性（真发一个请求，必须放后台线程）。"""
+    return BaseTask(lambda progress=None: A.llm_test_connection(cfg))
+
+
+def llm_fetch_models_task(cfg) -> BaseTask:
+    """拉取模型列表（联网，必须放后台线程）。"""
+    return BaseTask(lambda progress=None: A.llm_fetch_models(cfg))

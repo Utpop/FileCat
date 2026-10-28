@@ -70,6 +70,9 @@ def eq(got, want, msg=""):
 # --------------------------------------------------------------------------- #
 
 SANDBOX = os.path.join(ROOT, "_verify_tmp")
+# 撤销日志现在统一存在程序目录的 Name_backup 里；自检必须把它指到沙箱，
+# 否则跑一次测试就会往程序目录里塞一堆日志文件。
+os.environ["NAMECAT_LOG_DIR"] = os.path.join(SANDBOX, "_logs")
 
 
 def fresh(name: str) -> str:
@@ -108,12 +111,14 @@ CHAIN_RULES = {
 
 def test_rules_unit():
     case("A1 规则类型表完整")
-    eq(len(R.RULE_KINDS), 27, "27 种规则")
+    eq(len(R.RULE_KINDS), 27, "27 种规则（编号 / 序列化 / 模板…）")
     ok(len(set(R.RULE_KIND_IDS)) == len(R.RULE_KIND_IDS), "类型名无重复")
     ok(all(k in R.RULE_KIND_IDS for k in
-           ("insert", "delete", "replace", "regex", "case", "template", "serialize")),
+           ("insert", "delete", "replace", "regex", "case", "template", "number")),
        "常见类型齐全")
     ok("llm" in R.RULE_KIND_IDS, "LLM 精简规则已注册")
+    eq(R.normalize(R.Rule(kind="serialize")).kind, "number",
+       "旧配置里的 serialize 归一成 number")
 
     case("A2 前缀后缀")
     eq(R.transform(R.make_rule("prefix", "A_"), "b.txt"), "A_b.txt")
@@ -531,12 +536,12 @@ def test_merged_features():
     eq(R.transform(R.make_rule("insert", "prefix", "", "[T]"), "abc"), "[T]abc")
     eq(R.transform(R.make_rule("insert", "after", "!", "_v2"), "abc"), "abc", "锚点缺席不改")
 
-    case("C8 序列化（ReNamer 风格）")
-    # 起始值是「第一项的编号」，逐项递增（ReNamer 的 Serialize 语义）
-    eq(R.transform(R.make_rule("serialize", "1", "4"), "a", num=1), "0001a")
-    eq(R.transform(R.make_rule("serialize", "5", "4"), "a", num=3), "0007a",
-       "起始 5 + 第 3 项 - 1")
-    eq(R.transform(R.make_rule("serialize", "1", "4", "suffix"), "a", num=1), "a0001")
+    case("C8 编号（起始 = 第一个对象的号码）")
+    # 号码由计划层按规则上的起始/步长算好后传给 transform：num 就是要印的数字
+    eq(R.transform(R.make_rule("number", "1", "4"), "a", num=1), "0001a")
+    eq(R.transform(R.make_rule("number", "5", "4"), "a", num=7), "0007a",
+       "起始 5 + 步长 2 的第 2 项 = 7")
+    eq(R.transform(R.make_rule("number", "1", "4", "suffix"), "a", num=1), "a0001")
 
     case("C9 哈希追加（读文件）")
     box = fresh("c9")
@@ -959,6 +964,54 @@ def test_e2e():
                    kind="file")
     eq(len(C.list_logs(box)), C.MAX_LOGS, "只保留最近 20 份")
 
+    case("D9b 日志统一存在程序目录的 Name_backup 里")
+    box = fresh("d9b")
+    other = fresh("d9b_other")
+    touch(os.path.join(box, "a.txt"))
+    path = C.save_log(box, [(os.path.join(box, "a.txt"),
+                             os.path.join(box, "b.txt"))])
+    ok(path, "写了撤销日志")
+    ok(os.path.dirname(path) == C.log_dir(box),
+       "日志落在统一的备份目录里，不在目标目录下")
+    ok(not os.path.isdir(os.path.join(box, C.LOG_DIR_NAME)),
+       "目标目录里不再留 _rename_logs 文件夹")
+    ok(not os.path.exists(os.path.join(box, "b.txt")), "还没真正改名（只写日志）")
+
+    case("D9c 不同目录的日志混在一起但能分开查")
+    p1 = C.save_log(box, [(os.path.join(box, "x"), os.path.join(box, "y"))])
+    p2 = C.save_log(other, [(os.path.join(other, "x"), os.path.join(other, "y"))])
+    ok(p1 != p2, "两个目录写出了不同的日志文件")
+    got_box = C.list_logs(box)
+    got_other = C.list_logs(other)
+    ok(p1 in got_box, "A 目录能查到自己的日志")
+    ok(p1 not in got_other, "A 目录的日志不会出现在 B 目录里")
+    ok(p2 in got_other, "B 目录能查到自己的日志")
+    all_logs = C.list_logs("")
+    ok(p1 in all_logs and p2 in all_logs, "不给目录时能列出全部")
+    ok(len(all_logs) >= len(got_box) + len(got_other),
+       "全部的份数不少于各目录之和")
+
+    case("D9d 一个目录的日志不会挤掉另一个目录的")
+    box2 = fresh("d9d")
+    for i in range(C.MAX_LOGS + 5):
+        C.save_log(box2, [(os.path.join(box2, "o%d" % i),
+                           os.path.join(box2, "n%d" % i))], kind="file")
+    eq(len(C.list_logs(box2)), C.MAX_LOGS, "B 目录自己留了 20 份")
+    ok(len(C.list_logs(box)) >= 1, "A 目录的日志还在（没被 B 挤掉）")
+
+    case("D9e 旧格式日志仍然认得出（升级不丢撤销机会）")
+    box3 = fresh("d9e")
+    legacy_dir = os.path.join(box3, C.LOG_DIR_NAME)
+    os.makedirs(legacy_dir)
+    legacy = os.path.join(legacy_dir, "rename_20260101_120000_abc123.json")
+    with open(legacy, "w", encoding="utf-8") as fh:
+        json.dump({"app": "NameCat", "schema": C.LOG_SCHEMA, "time": "2026-01-01 12:00:00",
+                   "root": box3, "pairs": [{"old": os.path.join(box3, "a"),
+                                            "new": os.path.join(box3, "b")}]},
+                  fh, ensure_ascii=False)
+    ok(legacy in C.list_logs(box3), "老版本留在目标目录里的日志也认")
+    ok(legacy not in C.list_logs(box), "别的目录不会把它算进去")
+
     case("D10 大量文件扫描与计划（性能冒烟）")
     box = fresh("d10")
     for i in range(500):
@@ -1012,13 +1065,29 @@ def test_regressions():
     eq(T.render("pre#stem#post", ctx, num=3, width=2), "prea#bpost", "夹在文字里也取变量")
     eq(T.render("C# 笔记.txt", ctx, num=1, width=1), "C# 笔记.txt", "普通 # 原样")
 
-    case("E2 number / serialize 随序号递增")
+    case("E2 number 的号码来自规则自己的发号参数")
     eq([R.transform(R.make_rule("number", "1"), "a", num=n) for n in (1, 2, 3)],
-       ["1a", "2a", "3a"], "a=起始值，按序号递增")
+       ["1a", "2a", "3a"], "num 就是要印的号码")
     eq([R.transform(R.make_rule("number", "5", "2"), "a", num=n) for n in (1, 2)],
-       ["05a", "06a"], "a=起始值 b=补零宽度")
-    eq([R.transform(R.make_rule("serialize", "1", "4"), "a", num=n) for n in (1, 2)],
-       ["0001a", "0002a"], "serialize 同样递增")
+       ["01a", "02a"], "起始值不再在 transform 里二次叠加")
+
+    case("E2c 序列化：整名换号码，扩展名保持")
+    eq(R.apply_chain([R.make_rule("renumber", "1", "4", "",
+                                  extras={"scope": "global"})],
+                     "IMG_0001.mp4", 1, 4, None, 1), "0001.mp4",
+       "整名变成四位号码")
+    eq(R.apply_chain([R.make_rule("renumber", "1", "3", "")],
+                     "a.txt", 7, 3, None, 7), "007.txt", "按 num 发号")
+
+    case("E2b 规则上的起始/步长/补零/范围真的进到计划层")
+    items = [Item(os.path.join("x", "f%d.txt" % i)) for i in range(3)]
+    opts = P.PlanOptions()          # 计划层默认值全部交给规则覆盖
+    rule = R.make_rule("number", "5", "3", "prefix",
+                       extras={"step": "10", "scope": "global"})
+    plan = P.compute_names(items, [rule], opts)
+    eq([it.new_name for it in plan.items], ["005f0.txt", "015f1.txt", "025f2.txt"],
+       "起始 5 / 步长 10 / 补零 3 位")
+    eq([it.num for it in plan.items], [5, 15, 25], "num 按规则发号")
 
     case("E3 regex 的 {1} / {name} 引用默认生效")
     ctx = NameContext(os.path.join("x", "img123.txt"))
@@ -1084,7 +1153,9 @@ def test_regressions():
         ok(good, "第 %d 层：撤销无错（%s）" % (depth, errs))
         ok(os.path.exists(os.path.join(deep, "a.txt")),
            "第 %d 层：原名复原" % depth)
-        ok(not os.listdir(C.log_dir(box)), "第 %d 层：撤销后日志已删" % depth)
+        # 日志现在统一存在 Name_backup 里（各目录混在一起），
+        # 所以只能确认"这一份被删了"，不能查目录是不是空了
+        ok(not os.path.exists(out.log_path), "第 %d 层：撤销后日志已删" % depth)
 
     case("E8 预览的名字就是要落盘的名字（randomize 可复现）")
     box = fresh("e8")
@@ -1155,6 +1226,290 @@ def test_regressions():
     eq(ops._common_base([r"C:\a\b", r"D:\x"]), r"C:\a\b", "跨盘退回首项")
     eq(ops._common_base([r"C:\a\b", r"C:\a\c"]), r"C:\a", "同盘取共同父目录")
 
+    case("E14 递归扫描跳过统一备份目录（大小写不敏感）")
+    box = fresh("e14")
+    mkdir(os.path.join(box, C.BACKUP_DIR_NAME))
+    touch(os.path.join(box, C.BACKUP_DIR_NAME, "rename_abcdef12_x.json"))
+    touch(os.path.join(box, "keep.txt"))
+    got = sorted(os.path.basename(it.path)
+                 for it in scan(ScanOptions(root=box, kinds=(KIND_FILE,),
+                                            recursive=True)).items)
+    eq(got, ["keep.txt"], "Name_backup 里的日志不被当成重命名对象")
+
+    case("E15 撤销有跳过项时 Result.ok 为 False（不能靠 steps 推）")
+    box = fresh("e15")
+    touch(os.path.join(box, "a.txt"))
+    res = ops.scan_and_plan(box, [R.make_rule("prefix", "P_")],
+                            ScanOptions(root=box, kinds=(KIND_FILE,)),
+                            P.PlanOptions())
+    out = ops.apply(res.items, plan=res,
+                    opts=P.PlanOptions(dry_run=False), root=box)
+    touch(os.path.join(box, "a.txt"))           # 占住还原目标
+    back = ops.undo(out.log_path)
+    ok(not back.ok, "有跳过项时 ok 为 False")
+    ok("已存在，跳过" in back.message, "原因写进 message（%s）" % back.message)
+    os.remove(os.path.join(box, "a.txt"))
+    ok(ops.undo(out.log_path).ok, "清掉占位后再撤销即成功")
+
+    case("E16 手改坏的预设能读就读，绝不炸")
+    box = fresh("e16")
+    broken = os.path.join(box, "bad.json")
+    with open(broken, "w", encoding="utf-8") as fh:
+        fh.write('{"name": "x", "plan": 3, "scan": null, '
+                 '"rules": [{"kind": "case", "a": "lower", "extras": "oops"},'
+                 ' {"kind": "prefix", "selector": 7, "charset": null}]}')
+    preset = PS.load(broken)
+    eq(len(preset.rules), 2, "能救回来的规则仍在")
+    eq(preset.rules[0].kind, "case", "第一条仍是 case")
+    eq(preset.plan_options().width, 0, "脏 plan 当成空配置")
+    eq(preset.scan_options().root, "", "脏 scan 当成空配置")
+
+
+# --------------------------------------------------------------------------- #
+# F 组：供应商配置（协议 / 预设 / 密钥 / 连通性测试）
+# --------------------------------------------------------------------------- #
+
+def test_provider():
+    from engine import provider as PRV
+    from engine import secrets
+
+    case("F1 供应商预设齐备（OpenAI 兼容为主）")
+    keys = [p.key for p in PRV.PROVIDER_PRESETS]
+    for want in ("custom", "openai", "deepseek", "xiaomi_mimo", "opencode_go"):
+        ok(want in keys, "预设 %s 在列表里" % want)
+    eq(PRV.PROVIDER_PRESETS[0].key, "custom", "第一个是自定义供应商")
+    ok(all(p.base_url.startswith("https://") for p in PRV.PROVIDER_PRESETS
+           if p.key not in ("custom", "echo", "ollama")), "远程预设地址都是 https")
+    ok(PRV.PRESET_BY_KEY["ollama"].base_url.startswith("http://127.0.0.1"),
+       "本地 Ollama 用回环地址")
+
+    case("F2 协议列表与名称")
+    eq(len(PRV.PROTOCOLS), 3, "三种协议")
+    ok("OpenAI Chat Completions" in PRV.PROTOCOL_TEXT.values(), "有 Chat Completions")
+    ok("OpenAI Responses" in PRV.PROTOCOL_TEXT.values(), "有 Responses")
+    ok("Anthropic Messages" in PRV.PROTOCOL_TEXT.values(), "有 Anthropic Messages")
+
+    case("F3 套预设会填好地址与模型列表 URL")
+    cfg = PRV.ProviderConfig()
+    cfg = PRV.apply_preset(cfg, "deepseek")
+    eq(cfg.base_url, "https://api.deepseek.com", "DeepSeek 地址填好了")
+    eq(cfg.models_url, "https://api.deepseek.com/models", "模型列表 URL 也填好了")
+    ok(cfg.name, "供应商名称顺手填上了")
+    custom = PRV.ProviderConfig()
+    custom.base_url = "https://my.example.com"
+    after = PRV.apply_preset(custom, "custom")
+    eq(after.base_url, "https://my.example.com", "自定义预设不动用户自己填的地址")
+
+    case("F4 模型列表 URL 能按基础地址推算")
+    c2 = PRV.ProviderConfig()
+    c2.base_url = "https://api.openai.com/v1"
+    eq(PRV.models_url_for(c2), "https://api.openai.com/v1/models", "带 /v1 就不重复加")
+    c2.base_url = "https://api.deepseek.com"
+    eq(PRV.models_url_for(c2), "https://api.deepseek.com/v1/models", "不带 /v1 会补上")
+    c2.models_url = "https://x.example.com/list"
+    eq(PRV.models_url_for(c2), "https://x.example.com/list", "填了就用填的")
+
+    case("F5 配置文件里绝不含密钥")
+    data = PRV.ProviderConfig()
+    data.api_key = "sk-should-not-appear"
+    blob = json.dumps(data.as_dict(), ensure_ascii=False)
+    ok("sk-should-not-appear" not in blob, "序列化结果里没有密钥")
+    ok("api_key" not in data.as_dict(), "as_dict 里根本没有 api_key 这个键")
+
+    case("F6 密钥单独存取（DPAPI / Base64 兜底）")
+    ok(secrets.save_secret("sk-unit-test-123"), "密钥写进去了")
+    eq(secrets.load_secret(), "sk-unit-test-123", "能原样读回")
+    ok(secrets.has_secret(), "has_secret 报告已保存")
+    try:
+        with open(secrets.secret_path(), "rb") as fh:
+            raw = fh.read()
+        ok(b"sk-unit-test-123" not in raw, "磁盘上不是明文")
+    except OSError:
+        ok(False, "密钥文件读得到")
+    ok(secrets.save_secret("") is False, "传空串不会覆盖已保存的密钥")
+    eq(secrets.load_secret(), "sk-unit-test-123", "空串之后原密钥还在")
+    secrets.clear_secret()
+    eq(secrets.load_secret(), "", "清除后读不到")
+    eq(secrets.load_secret(), "", "没有文件时也不报错")
+
+    case("F7 连通性测试（本地 mock 服务）")
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    seen = {}
+
+    class _H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen["get"] = (self.path, {k.lower(): v for k, v in self.headers.items()})
+            raw = json.dumps({"data": [{"id": "m-a"}, {"id": "m-b"}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            seen["post"] = (self.path, {k.lower(): v for k, v in self.headers.items()})
+            self.rfile.read(n)
+            raw = json.dumps({"choices": [{"message": {"content": "pong"}}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), _H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        port = srv.server_address[1]
+        cfg = PRV.ProviderConfig()
+        cfg.base_url = "http://127.0.0.1:%d/v1" % port
+        cfg.api_key = "sk-unit"
+        cfg.model = "m-a"
+        cfg.headers = {"X-Trace-Id": "namecat"}
+        names, err = PRV.list_models(cfg)
+        eq((names, err), (["m-a", "m-b"], ""), "拉到模型列表且无错误")
+        eq(seen["get"][1].get("authorization"), "Bearer sk-unit", "带上了 Bearer 鉴权")
+        eq(seen["get"][1].get("x-trace-id"), "namecat", "自定义请求头发出去了")
+
+        res = PRV.test_connection(cfg)
+        ok(res["ok"], "连通性测试通过")
+        ok("2 个模型" in res["message"], "结果里说明了拉到几个模型")
+        ok(res["latency_ms"] >= 0, "给了耗时")
+
+        empty = PRV.ProviderConfig()
+        r2 = PRV.test_connection(empty)
+        ok(not r2["ok"] and r2["message"], "没填地址时明确说不行")
+        ok("URL" in r2["message"], "原因里点明是地址没填")
+
+        no_model = PRV.ProviderConfig()
+        no_model.base_url = "http://127.0.0.1:%d/v1" % port
+        no_model.api_key = "sk-unit"
+        r3 = PRV.test_connection(no_model)
+        ok(not r3["ok"], "没选模型时判失败")
+        ok("模型" in r3["message"], "原因里点明是模型没选")
+    finally:
+        srv.shutdown()
+
+    case("F8 连通性测试把 401 翻译成人话")
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class _H401(BaseHTTPRequestHandler):
+        def do_GET(self):
+            raw = b'{"error":{"message":"invalid api key"}}'
+            self.send_response(401)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_POST(self):
+            raw = b'{"error":{"message":"invalid api key"}}'
+            self.send_response(401)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), _H401)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        cfg = PRV.ProviderConfig()
+        cfg.base_url = "http://127.0.0.1:%d/v1" % srv.server_address[1]
+        cfg.api_key = "bad"
+        cfg.model = "m"
+        res = PRV.test_connection(cfg)
+        ok(not res["ok"], "401 判定为失败")
+        ok("401" in res["message"], "原因里带状态码")
+        ok("API Key" in res["message"], "原因里点明是密钥问题")
+    finally:
+        srv.shutdown()
+
+    case("F9 连不上时也给原因而不是抛异常")
+    cfg = PRV.ProviderConfig()
+    cfg.base_url = "http://127.0.0.1:1/v1"     # 一定连不上的端口
+    cfg.api_key = "k"
+    cfg.model = "m"
+    res = PRV.test_connection(cfg)
+    ok(not res["ok"], "连不上判失败")
+    ok(res["message"], "给了失败原因")
+
+    case("F10 三种协议的请求体与鉴权头")
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    got = {}
+
+    class _HP(BaseHTTPRequestHandler):
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(n).decode("utf-8"))
+            got[self.path] = (body, {k.lower(): v for k, v in self.headers.items()})
+            if self.path.endswith("/messages"):
+                raw = json.dumps({"content": [{"type": "text", "text": "pong"}]}).encode()
+            elif self.path.endswith("/responses"):
+                raw = json.dumps({"output": [{"content": [{"type": "output_text",
+                                                          "text": "pong"}]}]}).encode()
+            else:
+                raw = json.dumps({"choices": [{"message": {"content": "pong"}}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), _HP)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        base = "http://127.0.0.1:%d/v1" % srv.server_address[1]
+        for proto, tail in (("openai_chat", "/chat/completions"),
+                            ("openai_responses", "/responses"),
+                            ("anthropic_messages", "/messages")):
+            cfg = L.LLMConfig(provider="openai", base_url=base, api_key="sk-1",
+                              model="m1", protocol=proto)
+            out = L.make_client(cfg).plan(["a.jpg"], "只留主题", "zh", 24)
+            eq(out.errors, [], "%s 没有报错" % proto)
+            eq(list(out.mapping.values()), ["pong"], "%s 回复被解析出来了" % proto)
+            key = [k for k in got if k.endswith(tail)]
+            eq(len(key), 1, "%s 打到了正确的路径" % proto)
+            body, head = got[key[0]]
+            if proto == "anthropic_messages":
+                eq(head.get("x-api-key"), "sk-1", "Anthropic 用 x-api-key 鉴权")
+                ok("authorization" not in head, "Anthropic 不发 Bearer")
+                ok("system" in body, "system 提示词单独放 system 字段")
+            else:
+                eq(head.get("authorization"), "Bearer sk-1", "%s 用 Bearer 鉴权" % proto)
+    finally:
+        srv.shutdown()
+
+    case("F11 环境变量兜底时不搬内置默认值")
+    old = dict(os.environ)
+    try:
+        for name in ("NAMECAT_LLM_BASE_URL", "NAMEKIT_LLM_BASE_URL", "OPENAI_BASE_URL",
+                     "DEEPSEEK_BASE_URL", "NAMECAT_LLM_API_KEY", "NAMEKIT_LLM_API_KEY",
+                     "OPENAI_API_KEY", "DEEPSEEK_API_KEY", "NAMECAT_LLM_MODEL",
+                     "NAMEKIT_LLM_MODEL", "OPENAI_MODEL", "DEEPSEEK_MODEL",
+                     "NAMECAT_LLM_PROVIDER", "NAMEKIT_LLM_PROVIDER", "LLM_PROVIDER"):
+            os.environ.pop(name, None)
+        cfg = PRV.env_config()
+        eq(cfg.base_url, "", "没设环境变量时地址是空的（不冒默认值）")
+        eq(cfg.api_key, "", "密钥也是空的")
+        os.environ["OPENAI_BASE_URL"] = "https://env.example.com/v1"
+        os.environ["OPENAI_API_KEY"] = "sk-env"
+        cfg = PRV.env_config()
+        eq(cfg.base_url, "https://env.example.com/v1", "环境变量地址读到了")
+        eq(cfg.api_key, "sk-env", "环境变量密钥读到了")
+    finally:
+        os.environ.clear()
+        os.environ.update(old)
+
 
 # --------------------------------------------------------------------------- #
 # 入口
@@ -1167,7 +1522,8 @@ def main():
     t0 = time.time()
 
     for fn in (test_rules_unit, test_file_magic, test_compat_folder,
-               test_merged_features, test_llm, test_regressions, test_e2e):
+               test_merged_features, test_llm, test_regressions, test_e2e,
+               test_provider):
         print("== %s ==" % fn.__name__)
         fn()
 

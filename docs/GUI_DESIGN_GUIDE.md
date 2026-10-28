@@ -68,7 +68,7 @@
 | 计划 | `engine.plan.Plan` | 预览、预览结果 |
 | 计划包 | `PlanBundle` | 三阶段的唯一状态载体 |
 | 落盘 / 执行 | `ops.apply()` → `common.execute()` | 执行重命名 |
-| 撤销日志 | `<目录>\_rename_logs\rename_*.json` | 执行记录、撤销日志 |
+| 撤销日志 | `<程序目录>\Name_backup\rename_*.json` | 执行记录、撤销日志 |
 | 预设 | `engine.presets.Preset` | 预设（规则 + 扫描/编号选项，不含路径与密钥） |
 
 ---
@@ -81,13 +81,13 @@
 NameCat
 ├─ F1 对象采集（扫描与筛选）        → 工作台 · 扫描区
 ├─ F2 规则编排（27 种规则 + 链）    → 工作台 · 规则链 + 规则属性
-├─ F3 编号与作用域                 → 工作台 · 编号与执行选项
+├─ F3 编号与作用域                 → 工作台 · 规则链里的「编号」规则
 ├─ F4 计划生成与校验               → 工作台 · 预览（引擎侧）
 ├─ F5 预览与选择性执行             → 工作台 · 预览表 + 摘要条
 ├─ F6 执行落盘（含回滚）           → 工作台 · 执行 / 进度框
 ├─ F7 历史与撤销                   → 执行记录页
 ├─ F8 预设管理                     → 预设页 + 工作台保存
-├─ F9 LLM 智能精简                 → LLM 设置页 + 工作台 llm 规则
+├─ F9 LLM 智能精简                 → 供应商配置页 + 工作台 llm 规则
 ├─ F10 系统与偏好                  → 全局（顶栏 / 侧栏 / 状态栏 / 帮助）
 ├─ F11 命令行并行入口              → 无界面（CLI）
 └─ F12 自检与验证（开发用）        → 无界面（verify/）
@@ -110,7 +110,7 @@ NameCat
 | F1.9 | 文件头魔数校验 | `MAGIC` / `check_file_magic()` | 「校验文件头（魔数）」 |
 | F1.10 | 排序（10 档） | `SORT_MODES` | 「排序方式」下拉 |
 | F1.11 | 扫描结果计数与被过滤提示 | `ScanResult.skipped` | 工具栏计数 + NoticeBar |
-| F1.12 | 自动跳过 `_rename_logs` 目录 | `LOG_DIR_NAMES` | 无控件（隐式保护） |
+| F1.12 | 自动跳过 `Name_backup` 目录 | `LOG_DIR_NAMES` | 无控件（隐式保护） |
 
 #### F2 规则编排
 
@@ -131,14 +131,19 @@ NameCat
 
 #### F3 编号与作用域
 
-| # | 功能点 | 参数 |
-|---|---|---|
-| F3.1 | 起始值 / 步长 | `start` / `step` |
-| F3.2 | 补零宽度（0 = 不补） | `width` |
-| F3.3 | 编号范围 4 档 | `scope` = global / folder / kind / folder_kind |
-| F3.4 | 倒序编号 | `reverse` |
-| F3.5 | 扩展名是否参与规则链 | `split_ext` |
-| F3.6 | 是否同时重命名文件夹 | `rename_dirs`（选「文件夹 / 全部」时自动开） |
+发号参数长在「编号」规则自己身上（`number_options()` 从规则读出发号参数，计划层只用它
+算 `num` / `width`），链里不再有第二个编号入口；「序列化编号」与「编号」原本完全等价，
+已并进同一条规则。
+
+| # | 功能点 | 参数 | 界面承载 |
+|---|---|---|---|
+| F3.1 | 起始值 / 步长 | `Rule.a` / `extras.step` | 「编号」规则属性（一行三个数字） |
+| F3.2 | 补零宽度（0 = 不补） | `Rule.b` | 同上 |
+| F3.3 | 编号范围 4 档 | `extras.scope` = global / folder / kind / folder_kind | 同上（下拉） |
+| F3.4 | 倒序编号 | `extras.reverse` | 同上（勾选） |
+| F3.5 | 号码插在哪 | `Rule.c` = prefix / suffix / before / after | 同上（下拉） |
+| F3.6 | 扩展名是否参与规则链 | `PlanOptions.split_ext` | 高级筛选弹窗（链级开关） |
+| F3.7 | 是否同时重命名文件夹 | `PlanOptions.rename_dirs` | 高级筛选弹窗（选「文件夹 / 全部」时自动开） |
 
 #### F4 计划生成与校验（引擎侧，界面只展示结果）
 
@@ -214,7 +219,6 @@ NameCat
 |---|---|---|
 | F10.1 | 主题（单套浅色令牌 + QSS 占位替换） | `theme.qss()` |
 | F10.2 | 窗口基准尺寸与最小尺寸 | `theme.WINDOW` |
-| F10.3 | 侧栏折叠 / 展开 | `set_nav_collapsed()` |
 | F10.4 | 分栏比例记忆（规则区 : 预览区） | `prefs["split_rules2"/"split_editor2"]` |
 | F10.5 | 上次目录恢复 | `prefs["last_root"]` |
 | F10.6 | 帮助对话框（快捷键 + 各数据目录真实路径） | `show_help()` |
@@ -230,11 +234,11 @@ NameCat
 
 ### 2.3 功能 ↔ 页面矩阵
 
-| 功能域 | 工作台 | 预设 | 执行记录 | LLM 设置 | 全局 |
+| 功能域 | 工作台 | 预设 | 执行记录 | 供应商配置 | 全局 |
 |---|:--:|:--:|:--:|:--:|:--:|
 | F1 对象采集 | ● 主 | | | | |
 | F2 规则编排 | ● 主 | ○ 应用落位 | | ○ llm 参数 | |
-| F3 编号与作用域 | ● 主 | ○ 随预设 | | | |
+| F3 编号与作用域 | ● 主（在「编号」规则上） | ○ 随预设 | | | |
 | F4 计划生成 | ● 主 | | | | |
 | F5 预览与选择 | ● 主 | | | | |
 | F6 执行落盘 | ● 主 | | ○ 结果回溯 | | |
@@ -364,13 +368,13 @@ NameCAT/
 │  │  ├─ workspace.py        864   重命名工作台（主力页面）
 │  │  ├─ presets.py          230   预设管理
 │  │  ├─ history.py          410   执行记录与撤销
-│  │  └─ llm_settings.py     463   LLM 配置 + 要求文件编辑
+│  │  └─ llm_settings.py           供应商配置 + 测试连接 + 要求文件编辑
 │  ├─ widgets/
 │  │  ├─ common.py           420   Badge/SectionTitle/Hint/PageHeader/按钮/空状态/提示条/卡片
 │  │  ├─ scan_toolbar.py     329   扫描工具栏 + 高级筛选 + add_paths
 │  │  ├─ rule_list.py        235   规则链列表（拖拽排序）
 │  │  ├─ rule_editor.py      389   动态规则属性面板 + 选择器编辑器
-│  │  ├─ plan_options.py     178   编号与执行选项（可折叠）
+│  │  └─ （编号参数已并入「编号」规则的属性面板，不再单独成页）
 │  │  ├─ preview_table.py    378   预览表（Model + View + 右键菜单）
 │  │  ├─ plan_summary.py     228   统计 chip + 三按钮 + 窄窗自适应
 │  │  └─ drop_area.py         93   拖放事件过滤器
@@ -414,7 +418,7 @@ NameCAT/
 ```
 NameCatWindow (QMainWindow)
 ├─ AppHeader（logo / 标题 / 版本 / 帮助按钮）
-├─ Sidebar（4 个 NavItem + 折叠按钮）
+├─ Sidebar（4 个 NavItem）
 ├─ QStackedWidget
 │   ├─ WorkspacePage ◄────────── 最大从属树
 │   │   ├─ PageHeader + 加载/保存预设
@@ -429,7 +433,7 @@ NameCatWindow (QMainWindow)
 │   │   └─ PlanSummaryBar（6 chip + 摘要 + 预览/CSV/执行）
 │   ├─ PresetsPage      （PageHeader + NoticeBar + 表格卡片 + Hint）
 │   ├─ HistoryPage      （PageHeader + NoticeBar + 目录行 + 表格卡片 + Hint）
-│   └─ LLMSettingsPage  （PageHeader + NoticeBar + 滚动区(配置双列 + 要求文件) + 保存栏）
+│   └─ LLMSettingsPage  （PageHead + NoticeBar + 左栏滚动(供应商/模型/高级) + 右栏(生效明细 + 整理要求)）
 └─ QStatusBar（左：状态消息　右：当前根目录）
 ```
 
@@ -454,6 +458,7 @@ NameCatWindow (QMainWindow)
 | 模板变量参考 | `template_variables()` / `render_preview()` | `NameContext.variables()` / `template.render` |
 | 预设 CRUD | `builtin_presets/preset_paths/load_preset/save_preset/delete_preset` | `presets.*` |
 | LLM 客户端 | `llm_config/llm_client/llm_env_sources/llm_*instruction` | `llm.*` |
+| 供应商配置 | `llm_provider_config/llm_save_provider_config/llm_test_connection/llm_fetch_models/llm_apply_preset` | `provider.*` |
 | 状态文案 / 语气 | `status_text()` / `status_tone()` | `STATUS_TEXT` |
 | 勾选排除 | `set_excluded` / `is_excluded` / `clear_exclusions` | 直接改 `Item.status` |
 | 枚举给下拉框 | `sort_modes()` / `scope_text()` / `kinds_for()` / `ONLY_LABELS` | `SORT_MODES` / `SCOPE_TEXT` / `ONLY_CHOICES` |
@@ -511,7 +516,7 @@ NameCatWindow (QMainWindow)
             ├─ ProgressDialog（模态、不可关窗、说明「不提供强制中断」）
             ├─ W.apply_task(bundle, rules, client)
             └─ A.apply_plan → ops.apply(items, rules, opts(dry_run=False), plan=bundle.plan)
-                              └─ common.execute() → save_log() → <root>\_rename_logs\
+                              └─ common.execute() → save_log() → <程序目录>\Name_backup\
             ◄── done(result) ──► _apply_done()
                   ├─ ProgressDialog.finish(标题, 明细 + 撤销日志路径 + 失败项)
                   ├─ NoticeBar(success / error)
@@ -576,7 +581,7 @@ NameCatWindow (QMainWindow)
 | | `sort_mode` | str | `name_asc` | 10 档 |
 | | `max_depth` | int | 12 | 1–12 夹紧 |
 | | `selected` | tuple[str] | `()` | 「扫描对象」绝对路径 |
-| 计划 | `start` / `step` / `width` | int | 1 / 1 / 0 | 编号 |
+| 计划 | `start` / `step` / `width` | int | 1 / 1 / 0 | 编号（链里有 `number` 规则时被规则覆盖） |
 | | `scope` | str | `global` | 4 档 |
 | | `reverse` | bool | False | 倒序 |
 | | `split_ext` | bool | True | 扩展名参与规则链 |
@@ -622,7 +627,7 @@ keep_sep  切分时保留分隔符
 extras    llm 的 instruction / lang / max_len 等
 ```
 
-**27 种规则表**（GUI 的属性面板按 `KIND_FIELDS` 自动生成，不要为每种规则手写页面）：
+**27 种规则表**（GUI 的属性面板按 `KIND_FIELDS` 自动生成，「编号 / 序列化」共用手写的紧凑版式）：
 
 | 分组 | kind | 中文名 | 参数 a / b / c |
 |---|---|---|---|
@@ -640,8 +645,9 @@ extras    llm 的 instruction / lang / max_len 等
 | | `case` | 大小写 | lower/upper/title/sentence/capitalize |
 | | `trim` | 去首尾空格与尾点 | 字符集（默认空白） |
 | | `collapse` | 合并重复字符 | 字符（如空格） |
-| 编号与序列 | `number` | 编号 | 起始 / 补零宽度 / 位置 |
-| | `serialize` | 序列化编号 | 起始 / 位数 / 位置 |
+| 编号与序列 | `number` | 编号 | 起始 / 步长 / 补零 / 编号范围 / 倒序 / 位置 |
+| | ~~`serialize`~~ | 旧编号规则，已并入 `number`（旧配置里的 serialize 自动归一成编号） | — |
+| | `renumber` | 音视频文件序列化 | 起始 / 步长 / 补零 / 编号范围 / 倒序（整名换号码） |
 | | `pad_numbers` | 数字补零 | 宽度 / 填充字符 |
 | | `randomize` | 随机化 | 长度 / 字符集 / 位置 |
 | | `date_insert` | 插入日期 | 日期风格 / — / 位置 |
@@ -660,7 +666,8 @@ extras    llm 的 instruction / lang / max_len 等
 |---|:--:|:--:|:--:|:--:|
 | 默认（大多数） | ✓ | ✓ | ✓ | |
 | `template` / `llm` | ✓ | | ✓ | |
-| `number` / `serialize` | | ✓ | ✓ | |
+| `number` | | ✓ | ✓ | |
+| `renumber`（序列化） | | | ✓ | |
 | `remove_after` / `remove_before` | ✓ | ✓ | ✓ | ✓ |
 | `extension` | | | | |
 
@@ -676,6 +683,8 @@ extras    llm 的 instruction / lang / max_len 等
 | 常用规则 `COMMON_RULES` | 7 | template, replace, regex, case, number, trim, llm |
 | 预设（内置） | 4 | 照片序号（四位）/ 去掉末尾圆括号序号 / 首尾去空格并规范空格 / 改为小写并去非法字符 |
 | LLM 客户端 | 4 | openai(HTTP) / ollama / echo(离线替身) / unavailable |
+| LLM 协议 | 3 | openai_chat / openai_responses / anthropic_messages |
+| 供应商预设 | 7 | 自定义 / OpenAI / DeepSeek / Xiaomi MiMo / OpenCode Go / 本地 Ollama / 离线替身 |
 | LLM 命名风格 | 5 | short / natural / kebab / snake / camel（引擎已支持，界面未开放） |
 
 ### 6.6 文件与目录约定
@@ -686,11 +695,11 @@ extras    llm 的 instruction / lang / max_len 等
 | `<程序目录>\gui_state.json` | 偏好兜底 | 同上 |
 | `%APPDATA%\NameCat\presets\*.json` | 用户预设 | `engine/presets.py` |
 | `%APPDATA%\NameCat\llm_instruction.txt` | 交给模型的整理要求 | `engine/llm.py` |
-| `<目标目录>\_rename_logs\rename_*.json` | 撤销日志（schema 4，最多 20 份） | `engine/common.save_log` |
+| `<程序目录>\Name_backup\rename_*.json` | 撤销日志（schema 4，每目录最多 20 份） | `engine/common.save_log` |
 | 临时名 `__nk_tmp_*` | 中转改名残留（可检查） | `engine/common.execute` |
 | `%APPDATA%\NameKit\*` | 旧数据，**只读**并单向补齐 | `migrate_legacy_appdata()` |
 
-偏好白名单（`settings.DEFAULTS`）：`last_root / llm_provider / llm_model / llm_batch / llm_instruction_file / nav_collapsed / split_rules / split_editor`。
+偏好白名单（`settings.DEFAULTS`）：`last_root / llm_provider / llm_model / llm_batch`。
 禁存键（`FORBIDDEN`，命中即丢弃）：`api_key / apikey / key / token / secret / password`。
 
 ---
@@ -759,7 +768,7 @@ extras    llm 的 instruction / lang / max_len 等
 | 区域 | 尺寸 | 内容 | 交互 |
 |---|---|---|---|
 | 顶栏 `AppHeader` | 高 56 | 应用图标 24 + 「NameCat」+ 版本号 + 右侧「帮助」 | 帮助打开 `DetailDialog` |
-| 侧栏 `Sidebar` | 宽 204（折叠 56） | 4 个 `NavItem`（可勾选、互斥）+ 底部「收起」 | 点击切换页面；折叠后只留图标 + tooltip |
+| 侧栏 `Sidebar` | 固定宽 204 | 4 个 `NavItem`（可勾选、互斥） | 点击切换页面；窄窗口也不折叠（曾经有「收起侧栏」按钮，无实现、已移除） |
 | 页面栈 `QStackedWidget` | 自适应 | 4 页 | Ctrl+1…4 |
 | 状态栏 | 系统默认 | 左：状态消息（默认「就绪」）；右：当前根目录 | 只读 |
 
@@ -782,7 +791,7 @@ QSplitter(垂直, 比例 0.50，可拖)
   │   │    或 EmptyState「还没有规则」
   │   └ 卡片「规则属性 · 第 N 条/共 M 条」
   │        RuleEditor（动态字段 + 选择器 + 提示）
-  │   └ PlanOptionsPanel（折叠，跨两列；尾部提示「规则自上而下依次作用」）
+  │   └（编号参数不再单独成条：它是「编号」规则自己的属性）
   └ 卡片「预览 · N 项 · 已勾选 M 项」           [全选] [全不选]
        PreviewTable（8 列，可多选，右键菜单）
        或 EmptyState「拖入文件或文件夹开始」
@@ -818,16 +827,45 @@ PlanSummaryBar（固定在底部）
 - 「撤销」在无可还原项时置灰；撤销确认框用 `danger=True`。
 - 撤销结果：成功会删日志；失败**保留**日志并列出未完成项。
 
-### 8.5 LLM 设置页
+### 8.5 供应商配置页（LLM 设置）
 
-- 结构：`PageHeader`（重新读取 / 打开要求文件）+ `NoticeBar` + 滚动区 + **固定保存栏**（在任何尺寸下都能点到保存）。
-- 滚动区内：双列
-  - 左列一张卡：状态徽标（HTTP 接口 / 本地模型 / 离线替身 / 不可用）+ 客户端说明 + 不可用原因 + 分隔线 + 「本次运行的覆盖参数」（客户端 ▾ / 每批条数 / 模型名）。
-  - 右列两张卡：「生效配置明细」8 项（密钥显示「已配置（已遮蔽）」）+「配置来源（只读取环境变量）」9 项（变量名 + 已设置/未设置徽标，含义放 tooltip）+ 一行取值顺序提示。
-- 全宽一张卡：「整理要求文件」路径只读框 + 「按默认要求创建」+ 多行编辑器（等宽字体）+ 注释规则提示。
-- 保存栏：左「有未保存的修改 / 与磁盘一致」，右「放弃修改」+「保存要求」（主色）。
+页面按「供应商配置」分组，OpenAI 兼容接口为主：
 
-> 三条硬规则必须体现在设计上：① 配置只读环境变量，页面**不提供**「记住密钥」；② 密钥任何位置都不回显明文；③ `EchoClient` 必须明确标为「离线替身」，不得伪装成真模型。
+- 结构：`PageHead`（打开配置目录 / 保存配置）+ `NoticeBar` + 左右两栏。
+- 左栏（可纵向滚动，内容比视口高）：
+  - **供应商**：供应商名称 / 协议 ▾（OpenAI Chat Completions、OpenAI Responses、Anthropic Messages）/ 供应商预设 ▾（自定义、OpenAI、DeepSeek、Xiaomi MiMo、OpenCode Go、本地 Ollama、离线替身）/ 基础 URL / API Key / 测试连接。
+  - **供应商模型**：模型 ▾ / 手动添加模型（输入 + 添加）/ 获取并保存模型列表。
+  - **高级**：模型列表 URL / 自定义请求头（每行一条 `Key: Value`）。
+- 右栏：「当前生效」明细卡（供应商 / 协议 / 基础 URL / API Key / 模型 / 模型列表数量 + 就绪徽标）+「整理要求」卡（路径只读框 + 重新加载 + 多行编辑器 + 恢复默认 / 保存要求）。
+
+> 四条硬规则必须体现在设计上：① 密钥**永不回显**（输入框遮蔽，留空 = 沿用已保存的）；② 密钥单独存 `llm_credential.dat`（Windows 用 DPAPI 加密），普通配置 `llm_provider.json` 里绝不含密钥；③ `EchoClient` 必须明确标为「离线替身」，不得伪装成真模型；④ 测试连接与拉模型列表**必须放后台线程**（联网操作不许卡界面）。
+
+### 8.5b 左下角 LLM 状态气泡
+
+侧栏底部（导航项下面、状态栏上面）放着一个 180×56 的小卡：
+
+- 第一行：状态点（绿 = 连上了 / 黄 = 配了没测 / 红 = 连不上 / 灰 = 没配）+ 模型名。
+- 第二行：`已连接 · 平均 320 ms` / `已配置，尚未测试` / 失败原因（截断到 28 字）/ `去「供应商配置」里设置`。
+- 点一下跳到「供应商配置」页。
+
+数据全部来自真实观测（`engine/provider.ProviderStatus`）：测连接的结果、真实请求的耗时（取最近 20 次的均值）。配置一改，状态立刻回到「尚未测试」——不能拿旧的测试结果说事。
+
+### 8.5c 撤销日志的位置（统一备份目录）
+
+日志不再写进被改名的目标目录（那会在用户数据目录里到处留垃圾），
+统一存到**程序目录**的 `Name_backup\` 文件夹：
+
+- 文件名 `rename_<8位目录指纹>_<日期>_<时分秒>_<随机>.json`：指纹用来分开查各个
+  目标目录的日志，日期时间用来排序。
+- 清理按目录各留 20 份，再对总量压一道上限（200 份）——A 目录的日志不能把
+  B 目录的挤掉。
+- 旧版本留在 `<目标目录>\_rename_logs\` 的日志仍然认（只读兼容），升级不丢
+  可撤销的机会。
+- 程序目录不可写时（装在 Program Files 等）自动退回 `%APPDATA%\NameCat\Name_backup`。
+- `NAMECAT_LOG_DIR` 环境变量可强制指定位置（自检脚本靠它把日志写进沙箱）。
+
+「执行记录」页默认列出**全部目录**的日志（表头多一列「目标目录」），
+也能只筛某一个目录。
 
 ### 8.6 对话框清单
 
@@ -892,9 +930,9 @@ PlanSummaryBar（固定在底部）
 |---|---|
 | `radius` / `radius_sm` | 6px / 4px |
 | `btn_h` / `input_h` / `row_h` | 34px / 36px / 40px |
-| 字体 | `"Segoe UI", "Microsoft YaHei UI", "Noto Sans CJK SC", sans-serif` |
+| 字体 | 系统自带 UI 字体（Windows 取 `Microsoft YaHei UI`，其余按 `Microsoft YaHei` / `Noto Sans CJK SC` / `Segoe UI` 顺序回退；都缺则用 Qt 默认）。不随包分发字体文件。界面字重收敛到 Regular(400)/Bold(700) 两档（`base.map_weight`），避免合成加粗 |
 | 等宽 | `"Cascadia Mono", "Consolas", "JetBrains Mono", monospace` |
-| 字号 | 正文 13px / 小字 12px / 页面标题 22px |
+| 字号 | 正文 13px / 按钮文字 14px / 小字 12px / 页面标题 22px |
 | 窗口 | 1440×900，最小 1100×700；顶栏 56；侧栏 204；页面边距 20；间隔 16 |
 
 ### 9.4 图标表（44 个，内联 SVG，`icons.icon(name, color, size)`）
@@ -938,11 +976,11 @@ PlanSummaryBar（固定在底部）
 
 | 区域 | 空间不足时 |
 |---|---|
-| 侧栏 | 折叠到 56px，只留图标（可手动收起，状态持久化） |
+| 侧栏 | 固定 204，不折叠（没有收起功能，窄窗口下让内容区滚动） |
 | 底部摘要条 | 先隐藏摘要文字（tooltip 保留全文），**右侧三个按钮永远完整** |
 | 摘要数字 | 6 个 chip 固定最小宽 58，等距居中 |
 | 规则属性面板 | 字段竖排（标签在上、控件在下），不允许标签跑位 |
-| LLM 页 | 整体进滚动区；**保存栏固定在滚动区外** |
+| 供应商配置页 | 左栏内容进滚动区（别把行压扁）；右栏「整理要求」占满剩余高度 |
 | 页面副标题 | 允许压缩折行，不顶大最小宽度 |
 | 长路径 | 用只读单行框而不是 QLabel（避免整串不可断词撑宽页面）+ tooltip 给全 |
 
@@ -1013,7 +1051,7 @@ PlanSummaryBar（固定在底部）
 | `Delete`（含 `Backspace`） | 删除选中的规则 | 规则列表 |
 | `空格` | 切换当前预览行勾选 | 预览表 |
 
-侧栏 `NavItem` 的 tooltip 统一为「标题 — 说明（Ctrl+N）」，折叠态只显示标题 tooltip。
+侧栏 `NavItem` 的 tooltip 统一为「标题 — 说明（Ctrl+N）」。
 
 ---
 
@@ -1023,7 +1061,7 @@ PlanSummaryBar（固定在底部）
 |---|---|---|---|
 | **新规则类型** | `RULE_KINDS` 加一项 + `transform()` 加分支 | `KIND_FIELDS` 加字段表（决定表单长什么样）、必要时 `RULE_GROUPS` / `DEFAULTS` / `KIND_FLAGS` | 通常**零改动**（选择弹窗与属性面板自动长出） |
 | **新扫描选项** | `ScanOptions` 加字段 + `scan()` 过滤链插位置 | `FormState` 加字段 + `scan_options()` 传递 + `scan_dict/apply_scan_dict` | `ScanToolbar` 加控件 + `load_state/save_state` 双向映射 |
-| **新编号 / 计划选项** | `PlanOptions` 加字段 + `assign_numbers/compute_names` 用上 | `FormState` 加字段 + `plan_options()` + `plan_dict/apply_plan_dict` | `PlanOptionsPanel` 加控件 + 两个映射方法 |
+| **新编号参数** | `PlanOptions` 加字段 + `assign_numbers/compute_names` 用上，再在 `number_options()` 里从规则读出来 | `KIND_FIELDS["number"]` 加字段 | `WorkspacePage._number_props` 加一行 |
 | **新状态码** | `__init__.py` 的 `STATUS_TEXT` + 校验逻辑 | `status_text/status_tone` + `STATUS_ORDER` | 预览表颜色、摘要 chip、日志结果着色三处 |
 | **新页面** | — | 需要的数据先加适配函数 | 新建 `QWidget` → `NAV_ITEMS` 加项（顺序即 Ctrl+N）→ `_build_ui` 入栈 → `_wire` 连线 |
 | **新拖放目标** | — | — | `PathDrop(self)` 后 `attach()` 父容器**与**子控件（子控件会先吃掉事件） |
@@ -1122,7 +1160,7 @@ py -3 verify\gui_shots.py      :: 四页渲染 PNG，人工看布局
 
 | 项 | 现状 |
 |---|---|
-| 页面 | 4 页（工作台 / 预设 / 执行记录 / LLM 设置） |
+| 页面 | 4 页（工作台 / 预设 / 执行记录 / 供应商配置） |
 | 规则类型 | 27 种，6 个分组 |
 | 扫描选项 | 12 项（含 6 档类型、10 档排序） |
 | 计划选项 | 7 项（含 4 档编号范围） |

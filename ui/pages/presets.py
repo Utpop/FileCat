@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QMessageBox, QPushButton, QWidget
 
 from adapters import engine_adapter as A
+from ui import prefs
 from ui.base import (C, F, Button, Card, Elided, Label, NoticeBar, PageHead, Strip,
                      fit_scroll_content, grid_row, hbox, hline, scroll_area, vbox)
 from ui.pages.workspace import Item
@@ -42,15 +43,16 @@ class PresetOps(QWidget):
         apply_btn.clicked.connect(row["apply"])
         lay.addWidget(apply_btn, 0, Qt.AlignRight | Qt.AlignVCenter)
 
-        color = C["err"] if row["kind"] == "custom" else C["t4"]
+        can_del = row["kind"] in ("custom", "builtin")
         del_btn = QPushButton("删除")
         del_btn.setFont(F(12))
         del_btn.setFixedWidth(24)
         del_btn.setStyleSheet("QPushButton{border:0;background:transparent;color:%s;padding:0;}"
                               "QPushButton:hover{text-decoration:%s;}"
-                              % (color, "underline" if row["kind"] == "custom" else "none"))
-        del_btn.setEnabled(row["kind"] == "custom")
-        del_btn.setCursor(Qt.PointingHandCursor if row["kind"] == "custom" else Qt.ArrowCursor)
+                              % (C["err"] if can_del else C["t4"],
+                                 "underline" if can_del else "none"))
+        del_btn.setEnabled(can_del)
+        del_btn.setCursor(Qt.PointingHandCursor if can_del else Qt.ArrowCursor)
         del_btn.clicked.connect(row["delete"])
         lay.addWidget(del_btn, 0, Qt.AlignRight | Qt.AlignVCenter)
 
@@ -66,16 +68,19 @@ class PresetsPage(QWidget):
         self._rows: List[dict] = []
 
         outer = vbox(self, (20, 18, 20, 12), 12)
+        restore_btn = Button("恢复内置预设", "refresh")
+        restore_btn.clicked.connect(self._restore_builtin)
+        self.restore_btn = restore_btn
         reload_btn = Button("刷新", "refresh")
         reload_btn.clicked.connect(self.reload)
         open_btn = Button("打开预设目录", "open")
         open_btn.clicked.connect(self.open_dir)
         outer.addWidget(PageHead(
             "预设", "规则链 + 扫描 / 编号选项的命名组合，不含根目录与任何密钥",
-            [reload_btn, open_btn]))
+            [restore_btn, reload_btn, open_btn]))
 
-        self.notice = NoticeBar("内置预设不可删除或覆盖；自定义预设保存为 .json，"
-                                "文件损坏时该行标记「读取失败」")
+        self.notice = NoticeBar("内置预设可以删除（只是从列表隐藏，随时可恢复）；"
+                                "自定义预设保存为 .json，文件损坏时该行标记「读取失败」")
         outer.addWidget(self.notice)
 
         card = Card()
@@ -103,9 +108,20 @@ class PresetsPage(QWidget):
         self.reload()
 
     # ---------------- 数据 ----------------
+    def _hidden_builtins(self) -> List[str]:
+        return [n for n in (prefs.load().get("deleted_builtin") or []) if n]
+
+    def _set_hidden_builtins(self, names: List[str]):
+        data = prefs.load()
+        data["deleted_builtin"] = sorted(set(names))
+        prefs.save(data)
+
     def reload(self):
         rows: List[dict] = []
+        hidden = set(self._hidden_builtins())
         for name, preset in A.builtin_presets():
+            if name in hidden:
+                continue                       # 被用户删掉的内置预设不再列出
             rows.append({"name": name, "source": "内置", "kind": "builtin",
                          "count": len(preset.rules or []),
                          "note": preset.note or "内置预设", "preset": preset, "path": ""})
@@ -130,6 +146,8 @@ class PresetsPage(QWidget):
         builtin = sum(1 for r in rows if r["kind"] == "builtin")
         self.foot_left.setText("共 %d 个预设 · 内置 %d / 自定义 %d / 读取失败 %d"
                                % (len(rows), builtin, custom, broken))
+        # 有被隐藏的内置预设时才出现「恢复」入口
+        self.restore_btn.setVisible(bool(hidden))
 
     def _fill(self):
         while self.body_lay.count():
@@ -180,7 +198,21 @@ class PresetsPage(QWidget):
         self.status_message.emit("已应用预设：%s" % row["name"])
 
     def _delete(self, row):
-        if row["kind"] != "custom":
+        if row["kind"] not in ("custom", "builtin"):
+            return
+        if row["kind"] == "builtin":
+            if QMessageBox.question(
+                    self, "删除内置预设",
+                    "确认删除内置预设「%s」？\n\n它不会被真正删除，随时可用页面上方的"
+                    "「恢复内置预设」找回。" % row["name"],
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No) != QMessageBox.Yes:
+                return
+            self._set_hidden_builtins(self._hidden_builtins() + [row["name"]])
+            self.notice.set_text("已删除内置预设「%s」，需要时点「恢复内置预设」找回"
+                                 % row["name"], "success")
+            self.notice.show()
+            self.reload()
             return
         if QMessageBox.question(self, "删除预设", "确认删除「%s」？" % row["name"],
                                 QMessageBox.Yes | QMessageBox.No,
@@ -190,6 +222,12 @@ class PresetsPage(QWidget):
         self.notice.set_text("已删除预设「%s」" % row["name"] if ok
                              else "没有删掉这个预设：%s" % row["path"],
                              "success" if ok else "warn")
+        self.notice.show()
+        self.reload()
+
+    def _restore_builtin(self):
+        self._set_hidden_builtins([])
+        self.notice.set_text("已恢复全部内置预设", "success")
         self.notice.show()
         self.reload()
 

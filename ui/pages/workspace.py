@@ -12,6 +12,7 @@ import os
 from typing import List, Optional
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QLineEdit, QMenu, QMessageBox, QPushButton,
                                QSizePolicy, QVBoxLayout, QWidget)
@@ -19,7 +20,7 @@ from PySide6.QtWidgets import (QDialog, QFileDialog, QFrame, QGridLayout, QHBoxL
 from adapters import engine_adapter as A
 from engine import rules as R
 from ui.base import (C, F, R_XS, Badge, Button, Card, Check, Clickable, Chip,
-                     Elided, Label, NoticeBar, OptBar, PageHead, Select, Strip,
+                     Elided, EmptyState, Label, NoticeBar, PageHead, Select, Strip,
                      fit_scroll_content, grid_row, hbox, hline, icon, scroll_area,
                      spacer, svg_pixmap, vbox)
 from workers import task_workers as W
@@ -65,6 +66,11 @@ class Combo(Select):
         text = dict(self._opts).get(value, value)
         self.label.setText(text)
         self.label.setToolTip(text)
+
+    def set_options(self, options) -> None:
+        """换掉整组选项（模型列表变了以后用），并把当前值重新贴上去。"""
+        self._opts = list(options)
+        self.set_value(self._value)
 
     def mousePressEvent(self, _e):  # noqa: N802
         menu = QMenu(self)
@@ -165,7 +171,8 @@ class RuleRow(QWidget):
         self.setObjectName("RuleRow")
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setProperty("selected", "true" if selected else "false")
-        self.setFixedHeight(40)
+        # 名称和效果横排：列表很宽，竖排两行既占高度又浪费横向面积
+        self.setFixedHeight(36)
         self.setCursor(Qt.PointingHandCursor)
         lay = hbox(self, (8, 0, 8, 0), 8)
 
@@ -179,15 +186,16 @@ class RuleRow(QWidget):
         no.setText("%d" % index)
         lay.addWidget(no, 0, Qt.AlignVCenter)
 
-        main = QVBoxLayout()
-        main.setContentsMargins(0, 0, 0, 0)
-        main.setSpacing(1)
+        # 选中行：标题用品牌蓝（底色由 QSS 的 #RuleRow[selected] 给）
+        main = hbox(None, 0, 8)
         self.name = Elided(A.rule_title(rule), 12, 500,
-                           C["t1"] if rule.enabled else C["t3"])
+                           C["t3"] if not rule.enabled else
+                           (C["brand"] if selected else C["t1"]))
+        self.name.setMinimumWidth(48)     # 名称先占住一小段，效果占剩下的全部宽度
+        main.addWidget(self.name, 0, Qt.AlignVCenter)
         self.sub = Elided(A.rule_summary(rule), 11, 400,
                           C["t2"] if rule.enabled else "#C4C4C4")
-        main.addWidget(self.name)
-        main.addWidget(self.sub)
+        main.addWidget(self.sub, 1, Qt.AlignVCenter)
         lay.addLayout(main, 1)
 
         if not rule.enabled:
@@ -230,9 +238,13 @@ class RulePicker(QDialog):
         root.addWidget(search)
 
         body = QWidget()
+        body.setStyleSheet("background:%s;" % C["white"])
         self.list_lay = vbox(body, 0, 4)
         self.list_lay.addStretch(1)
-        root.addWidget(body, 1)
+        # 规则一多（现在 27 种）就装不进固定高度的弹窗，必须内滚：
+        # 否则 Qt 会把每个分组压扁，行与行互相重叠
+        self._scroll = scroll_area(body)
+        root.addWidget(self._scroll, 1)
 
         row = hbox(None, 0, 8)
         row.addStretch(1)
@@ -242,6 +254,7 @@ class RulePicker(QDialog):
         root.addLayout(row)
 
         self._rows = []
+        self._groups = []
         for group, kinds in A.RULE_GROUPS:
             holder = QWidget()
             gl = vbox(holder, 0, 2)
@@ -260,14 +273,21 @@ class RulePicker(QDialog):
                 gl.addWidget(b)
                 self._rows.append((kind, b))
             self.list_lay.insertWidget(self.list_lay.count() - 1, holder)
+            self._groups.append((holder, list(kinds)))
         search.textChanged.connect(self._filter)
+        fit_scroll_content(self._scroll)
 
     def _filter(self, text):
         text = (text or "").strip().lower()
+        hits = {}
         for kind, b in self._rows:
             hit = (not text) or text in A.rule_kind_text(kind).lower() \
                 or text in kind.lower() or text in A.rule_kind_note(kind).lower()
             b.setVisible(hit)
+            hits[kind] = hit
+        # 一个分组里一条都没命中时，连分组标题一起收起，别留空标题
+        for holder, kinds in self._groups:
+            holder.setVisible(any(hits.get(k) for k in kinds))
 
     def _take(self, kind):
         self._kind = kind
@@ -326,6 +346,20 @@ class AdvancedDialog(QDialog):
         row2.addWidget(Label("校验文件头（魔数）", 12, 400, C["t1"]), 0, Qt.AlignVCenter)
         root.addLayout(row2)
 
+        # 这两项不属于任何一条规则：扩展名由谁管、文件夹改不改名，作用在整条链上
+        row3 = hbox(None, 0, 10)
+        self.split_ext = Check(bool(state.split_ext))
+        self.split_ext.setToolTip("关掉后，除「扩展名」规则外，其它规则只改名字主干")
+        row3.addWidget(self.split_ext, 0, Qt.AlignVCenter)
+        row3.addWidget(Label("扩展名也参与规则链", 12, 400, C["t1"]), 0, Qt.AlignVCenter)
+        row3.addSpacing(20)
+        self.rename_dirs = Check(bool(state.rename_dirs))
+        self.rename_dirs.setToolTip("选「文件夹 / 全部」时自动打开")
+        row3.addWidget(self.rename_dirs, 0, Qt.AlignVCenter)
+        row3.addWidget(Label("同时重命名文件夹", 12, 400, C["t1"]), 0, Qt.AlignVCenter)
+        row3.addStretch(1)
+        root.addLayout(row3)
+
         root.addWidget(Label("图片：" + A.image_exts_text(), 11, 400, C["t3"]))
         root.addWidget(Label("视频：" + A.video_exts_text(), 11, 400, C["t3"]))
 
@@ -351,7 +385,55 @@ class AdvancedDialog(QDialog):
         except ValueError:
             s.max_depth = A.max_depth()
         s.verify_content = self.verify.isChecked()
+        s.split_ext = self.split_ext.isChecked()
+        s.rename_dirs = self.rename_dirs.isChecked()
         self.accept()
+
+
+class DropCard(Card):
+    """预览卡：整块接住拖进来的文件 / 文件夹。
+
+    空状态写着「拖入文件或文件夹开始」，所以拖放必须真的能用——卡片自己
+    收 drop，子控件不收时会冒泡上来。
+    """
+
+    dropped = Signal(list)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    @staticmethod
+    def _paths(event):
+        mime = event.mimeData()
+        if not mime.hasUrls():
+            return []
+        return [u.toLocalFile() for u in mime.urls() if u.isLocalFile()]
+
+    def _highlight(self, on):
+        self.setProperty("dropActive", "true" if on else "false")
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def dragEnterEvent(self, event):  # noqa: N802
+        if self._paths(event):
+            event.acceptProposedAction()
+            self._highlight(True)
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):  # noqa: N802
+        self._highlight(False)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):  # noqa: N802
+        self._highlight(False)
+        paths = self._paths(event)
+        if not paths:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.dropped.emit(paths)
 
 
 # --------------------------------------------------------------------------- #
@@ -417,7 +499,7 @@ class WorkspacePage(QWidget):
         pick = Button("扫描对象…")
         pick.clicked.connect(self._pick_items)
         row1.addWidget(pick)
-        self.btn_scan = Button("开始扫描", "scan")
+        self.btn_scan = Button("开始扫描", "scan", "cta", icon_px=16)
         self.btn_scan.clicked.connect(lambda: self.scan())
         row1.addWidget(self.btn_scan)
         lay.addLayout(row1)
@@ -465,9 +547,10 @@ class WorkspacePage(QWidget):
         grid.setVerticalSpacing(8)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
-        grid.setRowMinimumHeight(0, 192)
-        grid.setRowMinimumHeight(1, 34)
-        wrap.setFixedHeight(234)
+        # 240：让 5 行字段的规则（LLM / 插入文字等）不用滚动就能显示全，
+        # 差几个像素的场景再由 _props_fit 收行距兜底
+        grid.setRowMinimumHeight(0, 240)
+        wrap.setFixedHeight(240)
 
         self.rules_card = Card()
         rc = vbox(self.rules_card, 12, 0)
@@ -476,21 +559,26 @@ class WorkspacePage(QWidget):
         self.rule_badge = Badge("0 条")
         head.addWidget(self.rule_badge, 0, Qt.AlignVCenter)
         head.addWidget(spacer(), 1)
-        add = Button("添加规则", "plus", "sm", icon_px=12)
+        add = Button("添加规则", "plus", "sm_brand", icon_px=12)
         add.clicked.connect(lambda: self.add_rule())
         head.addWidget(add)
         rc.addLayout(head)
         rc.addSpacing(8)
+        # 列表装在同款圆角容器里（和预览的拖放区一个样式），行与边框之间有 6px 呼吸
+        self.rule_zone = QFrame()
+        self.rule_zone.setObjectName("ListZone")
+        self.rule_zone.setAttribute(Qt.WA_StyledBackground, True)
+        zone = vbox(self.rule_zone, 6, 0)
         self.rule_holder = QWidget()
         self.rule_lay = vbox(self.rule_holder, 0, 6)
         # 规则一多必须内滚：否则固定高度的卡片装不下，行会互相重叠/溢出卡片
         self.rule_scroll = scroll_area(self.rule_holder, min_height=120)
-        rc.addWidget(self.rule_scroll, 1)
-        self.rule_empty = Label("还没有规则。点「添加规则」，或从预设载入一组。",
-                                12, 400, C["t3"])
-        self.rule_empty.setAlignment(Qt.AlignCenter)
+        zone.addWidget(self.rule_scroll, 1)
+        self.rule_empty = EmptyState("doc", "还没有规则",
+                                     "点右上角「添加规则」，或从预设加载一组规则。")
         self.rule_empty.hide()
-        rc.addWidget(self.rule_empty, 1)
+        zone.addWidget(self.rule_empty, 1)
+        rc.addWidget(self.rule_zone, 1)
         grid.addWidget(self.rules_card, 0, 0)
 
         self.props_card = Card()
@@ -504,41 +592,25 @@ class WorkspacePage(QWidget):
         pc.addSpacing(10)
         self.props_holder = QWidget()
         self.props_lay = vbox(self.props_holder, 0, 0)
-        pc.addWidget(self.props_holder, 1)
+        # 字段多的规则（LLM 三项 + 作用范围）会超过卡片高度：内滚，别让布局去压扁每一行
+        self.props_scroll = scroll_area(self.props_holder)
+        pc.addWidget(self.props_scroll, 1)
         grid.addWidget(self.props_card, 0, 1)
-
-        self.optbar = self._optbar()
-        grid.addWidget(self.optbar, 1, 0, 1, 2)
         return wrap
-
-    def _optbar(self):
-        bar = OptBar()
-        bar.setFixedHeight(34)
-        lay = hbox(bar, (12, 0, 12, 0), 8)
-        ic = QLabel()
-        ic.setPixmap(svg_pixmap("right", C["t2"], 12))
-        ic.setFixedSize(12, 12)
-        lay.addWidget(ic, 0, Qt.AlignVCenter)
-        lay.addWidget(Label("编号与执行选项", 12, 500), 0, Qt.AlignVCenter)
-        self.opt_sum = Elided("", 11, 400, C["t3"])
-        self.opt_sum.setMinimumWidth(80)
-        lay.addWidget(self.opt_sum, 1, Qt.AlignVCenter)
-        lay.addWidget(Label("规则自上而下依次作用", 11, 400, C["t3"]), 0, Qt.AlignVCenter)
-        bar.clicked.connect(self._edit_plan_options)
-        return bar
 
     # ---------------- 预览 ----------------
     def _preview(self):
-        card = Card()
-        lay = vbox(card, (12, 12, 12, 0), 0)
+        card = DropCard()
+        card.dropped.connect(self.add_paths)
+        lay = vbox(card, (12, 12, 12, 12), 0)
         head = hbox(None, 0, 8)
         head.addWidget(Label("预览", 13, 600))
-        self.preview_hint = Elided("还没有扫描", 11, 400, C["t2"])
+        self.preview_hint = Elided("", 11, 400, C["t2"])   # 未扫描时留空，别和拖放区重复
         self.preview_hint.setMinimumWidth(120)
         head.addWidget(self.preview_hint, 1)
-        self.btn_all = Button("全选", kind="sm")
+        self.btn_all = Button("全选", "check_square", "sm_soft", icon_px=12)
         self.btn_all.clicked.connect(lambda: self._check_all(True))
-        self.btn_none = Button("全不选", kind="sm")
+        self.btn_none = Button("全不选", "square", "sm_soft", icon_px=12)
         self.btn_none.clicked.connect(lambda: self._check_all(False))
         head.addWidget(self.btn_all)
         head.addWidget(self.btn_none)
@@ -562,15 +634,25 @@ class WorkspacePage(QWidget):
         self.phead = grid_row([Item(c) for c in cols], 30, holder=Strip(C["s1"], 4))
         lay.addWidget(self.phead)
         lay.addSpacing(1)
-        lay.addWidget(hline())
+        # 表头下面这条分隔线要跟着表头一起显隐，否则空状态下会留一条孤零零的横线
+        self.phead_line = hline()
+        lay.addWidget(self.phead_line)
         self.rows_holder = QWidget()
         self.rows_lay = vbox(self.rows_holder, 0, 0)
         # 只有表格体滚动：表头与卡片边距固定，不跟着走
         self.rows_scroll = scroll_area(self.rows_holder, min_height=34 * 3)
         lay.addWidget(self.rows_scroll, 1)
-        self.empty = Label("还没有扫描。选一个文件夹后点「开始扫描」。", 12, 400, C["t3"])
-        self.empty.setAlignment(Qt.AlignCenter)
-        lay.addWidget(self.empty, 1)
+
+        # 空状态：虚线拖放区（形状本身就是"把东西放进来"的暗示）
+        self.drop_panel = QFrame()
+        self.drop_panel.setObjectName("DropZone")
+        self.drop_panel.setAttribute(Qt.WA_StyledBackground, True)
+        dz = vbox(self.drop_panel, (16, 10, 16, 10), 0)
+        dz.addWidget(EmptyState(
+            "inbox", "拖入文件或文件夹开始",
+            "把文件/文件夹拖到这里，或点「选择目录」扫描对象。"
+            "然后 F5 先扫描清单，再回来加规则。"), 1)
+        lay.addWidget(self.drop_panel, 1)
         return card
 
     def _preview_row(self, it, idx):
@@ -622,6 +704,10 @@ class WorkspacePage(QWidget):
         for widget, width in ((c_no, 56), (c_kind, 74)):
             widget.setFixedWidth(width)
             lay.addWidget(widget, 0)
+        # 自适应列必须跟表头一样用 Ignored：否则布局会按文字长度分配宽度，
+        # 长文件名那一行把整列撑开，文字一个字符都不省略，还把下一列挤歪。
+        for widget in (c_old, c_new, c_note):
+            widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         lay.addWidget(c_old, 1)
         lay.addWidget(c_new, 1)
         c_dir.setFixedWidth(200)
@@ -647,14 +733,14 @@ class WorkspacePage(QWidget):
             self.chips[key] = chip
             chips.addWidget(chip)
         lay.addLayout(chips)
-        self.sum_text = Elided("还没有扫描", 12, 400, C["t2"])
+        self.sum_text = Elided("", 12, 400, C["t2"])       # 同上：扫描之后才说话
         self.sum_text.setMinimumWidth(60)
         lay.addWidget(self.sum_text, 1)
         self.btn_preview = Button("预览变更")
         self.btn_preview.clicked.connect(self.request_preview)
         self.btn_csv = Button("导出 CSV")
         self.btn_csv.clicked.connect(self.export_csv)
-        self.btn_apply = Button("执行重命名", "play", "primary")
+        self.btn_apply = Button("执行重命名", "play", "cta", icon_px=16)
         self.btn_apply.clicked.connect(self.confirm_apply)
         lay.addWidget(self.btn_preview)
         lay.addWidget(self.btn_csv)
@@ -705,13 +791,17 @@ class WorkspacePage(QWidget):
         self._refresh_rules()
         self._refresh_preview()
         self._refresh_summary()
-        self._update_opt()
 
     def _refresh_rules(self):
         if not hasattr(self, "rule_lay"):
             return
         self._clear(self.rule_lay)
         self.rule_badge.setText("%d 条" % len(self.rules))
+        # 没有规则时容器退回白底：灰底是"这里有内容"的暗示，空盒子别抢戏
+        self.rule_zone.setProperty("empty", "true" if not self.rules else "false")
+        st = self.rule_zone.style()
+        st.unpolish(self.rule_zone)
+        st.polish(self.rule_zone)
         if not self.rules:
             self.rule_scroll.hide()
             self.rule_empty.show()
@@ -747,18 +837,26 @@ class WorkspacePage(QWidget):
         self._clear(self.props_lay)
         rule = self._current_rule()
         if rule is None:
-            self.props_meta.setText("未选择规则")
-            self.props_lay.addStretch(1)
-            tip = Label("选中左侧任意一条规则即可编辑参数。", 12, 400, C["t3"])
-            tip.setAlignment(Qt.AlignCenter)
-            self.props_lay.addWidget(tip)
-            self.props_lay.addStretch(1)
+            self.props_meta.setText("")     # 空状态自己会说明，标题栏不再重复一遍
+            self.props_lay.addWidget(EmptyState(
+                "pencil", "还没有选中规则", "在左边点一条规则，这里就会展示它的参数。"), 1)
+            self._props_fit()
             return
         idx = self.rules.index(rule) + 1
         self.props_meta.setText("第 %d 条 / 共 %d 条" % (idx, len(self.rules)))
+        # 标签列宽按当前规则最长的那个标签算：固定 62 会把「名字最大长度」裁掉
+        fm = QFontMetrics(F(11))
+        self._label_w = max(62, max(fm.horizontalAdvance(t) + 4 for t in
+                                    [lb for _k, lb, _c, _o in A.rule_fields(rule.kind)]
+                                    + ["作用范围"]))
 
-        self.props_lay.addWidget(self._field_row("规则类型", self._pill(A.rule_title(rule)),
-                                                 grow=False))
+        # 不再放「规则类型」一行：它和左侧选中行的名称是同一句话，纯属重复；
+        # 少了这 40px，字段多的规则也基本不用滚动
+        if rule.kind in ("number", "renumber"):
+            self._number_props(rule)
+            self.props_lay.addStretch(1)
+            self._props_fit()
+            return
         for key, label, ctl, opt in A.rule_fields(rule.kind):
             value = A.get_field(rule, key)
             if ctl == "combo" and isinstance(opt, list):
@@ -780,19 +878,104 @@ class WorkspacePage(QWidget):
             sel.changed.connect(lambda v, r=rule: self._set_selector(r, v))
             self.props_lay.addWidget(self._field_row("作用范围", sel, grow=True))
         self.props_lay.addStretch(1)
+        self._props_fit()
+
+    def _props_fit(self):
+        """装完再量一次：内容超出卡片就出滚动条，而不是把每一行压扁。
+
+        重建会换掉所有控件，所以滚到哪儿要自己记住再放回去。
+        """
+        bar = self.props_scroll.verticalScrollBar()
+        keep = bar.value()
+        fit_scroll_content(self.props_scroll)
+        # 只差几个像素也出滚动条，最难看：行间距收紧 1~3px 把这点溢出换回来
+        if 0 < bar.maximum() <= 6:
+            self.props_lay.setSpacing(max(3, 6 - bar.maximum()))
+            fit_scroll_content(self.props_scroll)
+        else:
+            self.props_lay.setSpacing(6)
+        bar.setValue(min(keep, bar.maximum()))
+
+    # ---------------- 编号规则：发号 + 插号同一条 ----------------
+    def _number_props(self, rule):
+        """编号规则的属性：起始 / 步长 / 补零 一行，编号范围、倒序、位置各一行。
+
+        发号参数就长在这条规则上，链里不再有第二个「编号入口」。
+        """
+        f = {key: (label, ctl, opt) for key, label, ctl, opt in A.rule_fields(rule.kind)}
+
+        group = QWidget()
+        row = hbox(group, 0, 6)
+        for key in ("a", "extras.step", "b"):
+            if key not in f:
+                continue
+            label = f[key][0]
+            lb = Label(label, 11, 400, C["t2"])
+            lb.setFixedWidth(max(32, 11 * len(label) + 4))
+            row.addWidget(lb, 0, Qt.AlignVCenter)
+            box = FieldEdit(A.get_field(rule, key), width=56, height=28)
+            box.edited.connect(lambda r=rule, k=key, w=box: self._set_field(r, k, w.text()))
+            row.addWidget(box, 0, Qt.AlignVCenter)
+            row.addSpacing(10)
+        row.addStretch(1)
+        group.setFixedHeight(28)
+        self.props_lay.addWidget(self._wrap_row(group))
+
+        if "extras.scope" in f:
+            scope = Combo(list(A.scope_text().items()),
+                          A.get_field(rule, "extras.scope") or "global",
+                          width=0, height=30)
+            scope.setMinimumWidth(150)
+            scope.changed.connect(lambda v, r=rule: self._set_field(r, "extras.scope", v))
+            self.props_lay.addWidget(self._field_row("编号范围", scope, grow=True))
+
+        if "extras.reverse" in f:
+            rev = QWidget()
+            rrow = hbox(rev, 0, 6)
+            cb = Check(A.get_field(rule, "extras.reverse") not in ("", "0"))
+            cb.toggled.connect(lambda on, r=rule: self._set_field(
+                r, "extras.reverse", "1" if on else ""))
+            rrow.addWidget(cb, 0, Qt.AlignVCenter)
+            rrow.addWidget(Label(f["extras.reverse"][0], 12, 400, C["t1"]), 0,
+                          Qt.AlignVCenter)
+            rrow.addStretch(1)
+            rev.setFixedHeight(24)
+            self.props_lay.addWidget(rev)
+
+        if "c" in f:
+            pos = Combo(f["c"][2], A.get_field(rule, "c") or "prefix", width=0, height=30)
+            pos.setMinimumWidth(130)
+            pos.changed.connect(lambda v, r=rule: self._set_field(r, "c", v))
+            self.props_lay.addWidget(self._field_row("位置", pos, grow=True))
+
+        tip = Label("号码按扫描顺序发号；整个名字换成序号，扩展名原样保留。"
+                    if rule.kind == "renumber" else
+                    "号码按扫描顺序发号；这条规则同时负责发号与摆放位置。",
+                    11, 400, C["t3"])
+        tip.setWordWrap(True)
+        self.props_lay.addSpacing(4)
+        self.props_lay.addWidget(tip)
+
+    def _wrap_row(self, control):
+        wrap = QWidget()
+        wl = vbox(wrap, 0, 0)
+        wl.addWidget(control)
+        wl.addSpacing(6)
+        return wrap
 
     def _field_row(self, label, control, grow=True):
         holder = QWidget()
         row = hbox(holder, 0, 10)
         lb = Label(label, 11, 400, C["t2"])
-        lb.setFixedWidth(62)
+        lb.setFixedWidth(getattr(self, "_label_w", 62))
         row.addWidget(lb, 0, Qt.AlignVCenter)
         if grow:
             row.addWidget(control, 1)
         else:
             row.addWidget(control, 0, Qt.AlignVCenter)
             row.addStretch(1)
-        holder.setFixedHeight(28)
+        # 容器必须容得下控件本身：30 高的输入框放进 28 高的 holder，底边框就被裁掉了
+        holder.setFixedHeight(max(28, control.height() or control.sizeHint().height()))
         wrap = QWidget()
         wl = vbox(wrap, 0, 0)
         wl.addWidget(holder)
@@ -816,9 +999,9 @@ class WorkspacePage(QWidget):
         has_plan = self.bundle is not None and self.bundle.has_plan
         stats = self.bundle.stats() if self.bundle else {}
         for key, chip in self.chips.items():
-            chip.val.setText(str(int(stats.get(key, 0))))
+            chip.set_value(int(stats.get(key, 0)))
         if not has_scan:
-            self.sum_text.setText("还没有扫描")
+            self.sum_text.setText("")                    # 空状态的信息由拖放区说
         elif not has_plan:
             self.sum_text.setText("已扫描 %d 项，尚未应用规则" % stats.get("total", 0))
         elif self.stale:
@@ -844,8 +1027,9 @@ class WorkspacePage(QWidget):
         items = self.bundle.items() if self.bundle else []
         has = bool(items)
         self.phead.setVisible(has)
+        self.phead_line.setVisible(has)
         self.rows_scroll.setVisible(has)
-        self.empty.setVisible(not has)
+        self.drop_panel.setVisible(not has)
         for i, it in enumerate(items, 1):
             self.rows_lay.addWidget(self._preview_row(it, i))
         self.rows_lay.addStretch(1)
@@ -866,14 +1050,6 @@ class WorkspacePage(QWidget):
             if w is not None:
                 out.append(w)
         return out
-
-    def _update_opt(self):
-        s = self.state
-        scope = A.scope_text().get(s.scope, s.scope)
-        self.opt_sum.setText("起始 %d · 步长 %d · %s · 编号范围「%s」· %s"
-                             % (s.start, s.step,
-                                "补零 %d 位" % s.width if s.width else "不补零", scope,
-                                "扩展名参与规则链" if s.split_ext else "整名参与"))
 
     def _mark_stale(self):
         if self.bundle is not None and self.bundle.has_plan:
@@ -986,99 +1162,36 @@ class WorkspacePage(QWidget):
         self._on_root_changed()
         self.scan()
 
+    def add_paths(self, paths):
+        """拖进来 / 选进来的路径：单个文件夹当根目录扫里面，其余当「扫描对象」。"""
+        items = [p for p in (paths or []) if p and os.path.exists(p)]
+        if not items:
+            return
+        if len(items) == 1 and os.path.isdir(items[0]):
+            self.state.selected = ()
+            root = items[0]
+        else:
+            self.state.selected = tuple(items)
+            try:
+                root = os.path.commonpath([p if os.path.isdir(p) else os.path.dirname(p)
+                                           for p in items])
+            except ValueError:
+                root = os.path.dirname(items[0])
+        if root:
+            self.path.setText(root)
+            self.state.root = root
+        self.scan()
+
     def _pick_items(self):
         start = self.state.root or os.path.expanduser("~")
         files, _ = QFileDialog.getOpenFileNames(self, "选择要处理的对象", start)
-        if not files:
-            return
-        self.state.selected = tuple(files)
-        try:
-            base = os.path.commonpath([f if os.path.isdir(f) else os.path.dirname(f)
-                                       for f in files])
-        except ValueError:
-            base = os.path.dirname(files[0])
-        if base:
-            self.path.setText(base)
-            self.state.root = base
-        self.scan()
+        if files:
+            self.add_paths(files)
 
     def _advanced(self):
         if AdvancedDialog(self.state, self).exec() == QDialog.Accepted:
             self._mark_stale()
             self.scan()
-
-    def _edit_plan_options(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("编号与执行选项")
-        dlg.setMinimumWidth(440)
-        dlg.setStyleSheet("QDialog{background:%s;}" % C["white"])
-        lay = vbox(dlg, 18, 12)
-
-        def row(label, widget, tip=""):
-            r = hbox(None, 0, 10)
-            lb = Label(label, 12, 400, C["t2"])
-            lb.setFixedWidth(88)
-            if tip:
-                lb.setToolTip(tip)
-            r.addWidget(lb, 0, Qt.AlignVCenter)
-            r.addWidget(widget, 0)
-            r.addStretch(1)
-            lay.addLayout(r)
-            return widget
-
-        start = row("起始值", FieldEdit(str(self.state.start), width=96, height=32),
-                    tip="第一个对象拿到的编号")
-        step = row("步长", FieldEdit(str(self.state.step), width=96, height=32),
-                   tip="编号每次增加多少：1 = 依次 1、2、3；10 = 1、11、21")
-        width = row("补零宽度", FieldEdit(str(self.state.width), width=96, height=32),
-                    tip="编号位数不足时前面补 0：3 位 → 001；0 = 不补零")
-        scope = row("编号范围", Combo(list(A.scope_text().items()),
-                                     self.state.scope, width=250, height=32),
-                    tip="整批连续编号，或按文件夹/类型各自从起始值重新编号")
-
-        lay.addWidget(Label("示例：起始 1 · 步长 1 · 补零 3 位 → 001、002、003…；"
-                            "步长 10 → 001、011、021", 11, 400, C["t3"]))
-        lay.addSpacing(2)
-
-        r1 = hbox(None, 0, 8)
-        split = Check(self.state.split_ext)
-        r1.addWidget(split, 0, Qt.AlignVCenter)
-        r1.addWidget(Label("扩展名不参与规则链", 12, 400, C["t1"]), 0, Qt.AlignVCenter)
-        r1.addStretch(1)
-        lay.addLayout(r1)
-        r2 = hbox(None, 0, 8)
-        dirs = Check(self.state.rename_dirs)
-        r2.addWidget(dirs, 0, Qt.AlignVCenter)
-        r2.addWidget(Label("同时重命名文件夹", 12, 400, C["t1"]), 0, Qt.AlignVCenter)
-        r2.addStretch(1)
-        lay.addLayout(r2)
-
-        btns = hbox(None, 0, 8)
-        btns.addStretch(1)
-        cancel = Button("取消")
-        cancel.clicked.connect(dlg.reject)
-        ok = Button("应用", kind="primary")
-
-        def apply():
-            s = self.state
-            for attr, widget in (("start", start), ("step", step), ("width", width)):
-                try:
-                    setattr(s, attr, max(0, int(widget.text() or 0)))
-                except ValueError:
-                    pass
-            s.step = max(1, s.step)
-            s.scope = scope.value() or "global"
-            s.split_ext = split.isChecked()
-            s.rename_dirs = dirs.isChecked()
-            dlg.accept()
-            self._update_opt()
-            self._mark_stale()
-
-        ok.clicked.connect(apply)
-        btns.addWidget(cancel)
-        btns.addWidget(ok)
-        lay.addLayout(btns)
-        dlg.exec()
 
     # ================= 流程 =================
     def _busy_set(self, busy, text=""):
@@ -1163,6 +1276,8 @@ class WorkspacePage(QWidget):
         self.stale = False
         self._refresh_preview()
         self._refresh_summary()
+        # 这一步可能真发了 LLM 请求 —— 让左下角的气泡刷新延迟与状态
+        self._notify_llm_status()
         warns = list(getattr(bundle.plan, "warnings", []) or [])
         if warns:
             self._notice_msg("生成预览时有提示：" + "；".join(warns[:3]), "warn")
@@ -1185,9 +1300,17 @@ class WorkspacePage(QWidget):
         if not A.llm_has_rule(self.rules):
             return None
         main = self.window()
-        getter = getattr(main, "llm_overrides", None)
-        provider, model, batch = getter() if callable(getter) else ("", "", 0)
-        return A.llm_client(provider, model, batch)
+        getter = getattr(main, "llm_client", None)
+        if callable(getter):
+            return getter()
+        return A.llm_client()
+
+    def _notify_llm_status(self):
+        """通知窗口刷新左下角的 LLM 状态气泡（真跑过请求后延迟才有意义）。"""
+        main = self.window()
+        refresh = getattr(main, "refresh_llm_bubble", None)
+        if callable(refresh):
+            refresh()
 
     # ================= 勾选 / 导出 / 执行 =================
     def _on_row_check(self):
@@ -1270,7 +1393,6 @@ class WorkspacePage(QWidget):
         self.bundle = None
         self.path.setText(self.state.root)
         self.only.set_value(self.state.only)
-        self._update_opt()
         self._refresh_all()
         self.status_message.emit("已应用预设：%s" % preset.name)
 

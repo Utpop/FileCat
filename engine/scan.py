@@ -89,7 +89,11 @@ SORT_KEYS = [k for k, _t in SORT_MODES]
 SORT_TEXT = dict(SORT_MODES)
 
 MAX_DEPTH = 12
-LOG_DIR_NAMES = ("_rename_logs",)
+# 扫描时要跳过的目录名：旧的日志目录（老版本留下的）与新的统一备份目录
+LOG_DIR_NAMES = ("_rename_logs", "Name_backup")
+# 比较一律走小写（Windows 目录名大小写不敏感）——别拿 LOG_DIR_NAMES 直接比对，
+# 否则 `Name_backup` 永远对不上 `name_backup`，跳过等于没写。
+LOG_DIR_SKIP = tuple(name.lower() for name in LOG_DIR_NAMES)
 
 
 # --------------------------------------------------------------------------- #
@@ -344,7 +348,7 @@ def scan(opts: ScanOptions,
                 continue
             if is_dir:
                 low = ent.name.lower()
-                if low in LOG_DIR_NAMES and not opts.follow_log_dirs:
+                if low in LOG_DIR_SKIP and not opts.follow_log_dirs:
                     continue
                 dirs_kept.append(ent)
             take(ent.path, ent.name, is_dir)

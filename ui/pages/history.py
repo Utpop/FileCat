@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""ui.pages.history —— 执行记录与撤销（读 _rename_logs，撤销走引擎日志）。"""
+"""ui.pages.history —— 执行记录与撤销（读 Name_backup 里的日志，撤销走引擎日志）。"""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ class HistoryPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("Root")
-        self._root = ""
+        self._root = ""            # 空 = 看全部目录的日志
         self._rows: List[dict] = []
         self.runner = W.TaskRunner(self, max_threads=1)
 
@@ -34,7 +34,7 @@ class HistoryPage(QWidget):
         open_btn = Button("打开日志目录", "open")
         open_btn.clicked.connect(self.open_dir)
         outer.addWidget(PageHead(
-            "执行记录", "每次落盘都会生成撤销日志；撤销只在日志仍存在时可用",
+            "执行记录", "撤销日志统一存在程序的 Name_backup 文件夹里；撤销只在日志仍存在时可用",
             [refresh, open_btn]))
 
         self.notice = NoticeBar("日志按目录存放；先在「重命名工作台」选一个目录")
@@ -49,13 +49,16 @@ class HistoryPage(QWidget):
         ic.setPixmap(svg_pixmap("folder", C["t2"], 15))
         ic.setFixedSize(15, 15)
         bl.addWidget(ic, 0, Qt.AlignVCenter)
-        self.path_label = Elided("尚未选择目录", 12, 500, C["t1"])
+        self.path_label = Elided("全部目录", 12, 500, C["t1"])
         self.path_label.setMinimumWidth(240)
         bl.addWidget(self.path_label, 0, Qt.AlignVCenter)
         self.meta = Elided("", 11, 400, C["t3"])
         self.meta.setMinimumWidth(0)
         bl.addWidget(self.meta, 1, Qt.AlignVCenter)
         bl.addWidget(QWidget(), 1)
+        all_btn = Button("全部目录", kind="mid")
+        all_btn.clicked.connect(self._show_all)
+        bl.addWidget(all_btn, 0, Qt.AlignVCenter)
         browse = Button("选择目录", kind="mid")
         browse.clicked.connect(self._browse)
         bl.addWidget(browse, 0, Qt.AlignVCenter)
@@ -66,7 +69,7 @@ class HistoryPage(QWidget):
 
         card = Card()
         lay = vbox(card, 0, 0)
-        lay.addWidget(grid_row([Item(("执行时间", 150)), Item("使用的预设"),
+        lay.addWidget(grid_row([Item(("执行时间", 150)), Item("目标目录"),
                                 Item(("数量", 80), align_right=True), Item("结果"),
                                 Item(("日志状态", 230)),
                                 Item(("操作", 110), align_right=True)],
@@ -83,25 +86,27 @@ class HistoryPage(QWidget):
         fl = hbox(foot, (14, 0, 14, 0), 8)
         self.foot_left = Label("", 12, 400, C["t2"])
         fl.addWidget(self.foot_left, 1)
-        fl.addWidget(Label("日志保留 30 天", 11, 400, C["t3"]))
+        self.foot_right = Label("", 11, 400, C["t3"])
+        fl.addWidget(self.foot_right, 0)
         lay.addWidget(foot)
         outer.addWidget(card, 1)
         self._fill()
 
     # ---------------- 目录 ----------------
     def set_root(self, root: str, reload: bool = True):
+        """指定只看某个目录的日志；传空串 = 看全部。"""
         root = (root or "").strip()
         if root == self._root and self._rows:
             return
         self._root = root
-        self.path_label.setText(root or "尚未选择目录")
-        if reload and root:
+        self.path_label.setText(root or "全部目录")
+        if reload:
             self.reload()
 
     def _browse(self):
         from PySide6.QtWidgets import QFileDialog
         start = self._root or os.path.expanduser("~")
-        path = QFileDialog.getExistingDirectory(self, "选择要查看执行记录的目录", start)
+        path = QFileDialog.getExistingDirectory(self, "只看这个目录的执行记录", start)
         if path:
             self.set_root(path)
 
@@ -115,14 +120,11 @@ class HistoryPage(QWidget):
             return
         self.set_root(root)
 
+    def _show_all(self):
+        self.set_root("")
+
     # ---------------- 读取 ----------------
     def reload(self):
-        if not self._root:
-            self._rows = []
-            self._fill()
-            self.notice.set_text("还没有选择目录", "warn")
-            self.notice.show()
-            return
         if self.runner.busy():
             return
         task = W.logs_task(self._root)
@@ -154,19 +156,21 @@ class HistoryPage(QWidget):
             self.body_lay.addWidget(self._row(row))
         fit_scroll_content(self.body_scroll)
         if not self._rows:
-            tip = Label("这个目录里还没有撤销日志；执行一次重命名后会出现在这里。"
-                        if self._root else "先选择一个目录。", 12, 400, C["t3"])
+            tip = Label("还没有撤销日志；执行一次重命名后会出现在这里。"
+                        if not self._root else "这个目录里还没有撤销日志。",
+                        12, 400, C["t3"])
             tip.setAlignment(Qt.AlignCenter)
             self.body_lay.addWidget(tip, 1)
         else:
             self.body_lay.addStretch(1)
         if self._root:
-            self.meta.setText("共 %d 条记录 · 保留最近 30 条" % len(self._rows))
-            self.meta.setToolTip("日志目录：%s" % A.log_dir(self._root))
+            self.meta.setText("共 %d 条记录" % len(self._rows))
         else:
-            self.meta.setText("")
+            self.meta.setText("全部目录 · 共 %d 条记录" % len(self._rows))
+        self.meta.setToolTip("日志目录：%s" % A.backup_dir())
         self.foot_left.setText("共 %d 条记录 · 撤销按日志逐条还原，已不存在的文件自动忽略"
                                % len(self._rows))
+        self.foot_right.setText("日志目录：%s" % A.backup_dir())
 
     def _row(self, row):
         pairs = row.get("pairs") or []
@@ -178,7 +182,11 @@ class HistoryPage(QWidget):
 
         when = Label(str(row.get("time") or "未记录"), 12, 400, C["t1"])
         when.setFixedWidth(150)
-        preset = Elided(str(row.get("note") or "—"), 13, 500, C["t1"])
+        # 目标目录：日志现在全存在一个文件夹里，这一列必须看得出是哪个目录
+        root = str(row.get("root") or "")
+        target = Elided(root, 12, 400, C["t1"])
+        target.setToolTip(root)
+        target.setMinimumWidth(0)
 
         count = Label("%d 项" % (row.get("count") or 0), 12, 400, C["t2"])
         count.setFixedWidth(80)
@@ -192,6 +200,7 @@ class HistoryPage(QWidget):
 
         log = Elided(str(row.get("name") or ""), 11, 400, C["t2"])
         log.setFixedWidth(230)
+        log.setToolTip("日志文件：%s" % row.get("path", ""))
 
         act_w = QWidget()
         act_w.setFixedWidth(110)
@@ -209,7 +218,7 @@ class HistoryPage(QWidget):
             al.addWidget(Label("—", 12, 400, C["t4"]), 0, Qt.AlignRight | Qt.AlignVCenter)
 
         lay.addWidget(when, 0)
-        lay.addWidget(preset, 1)
+        lay.addWidget(target, 1)
         lay.addWidget(count, 0)
         lay.addWidget(res_w, 1)
         lay.addWidget(log, 0)
@@ -241,9 +250,10 @@ class HistoryPage(QWidget):
         pairs = row.get("pairs") or []
         if not pairs:
             return
-        msg = ("日志：%s\n执行时间：%s\n可还原 %d 项。\n\n"
+        msg = ("目标目录：%s\n日志：%s\n执行时间：%s\n可还原 %d 项。\n\n"
                "撤销会把这些对象改回原名；目标已存在时会跳过而不是覆盖。"
-               % (row.get("name", ""), row.get("time") or "未记录", len(pairs)))
+               % (row.get("root") or "未记录", row.get("name", ""),
+                  row.get("time") or "未记录", len(pairs)))
         if QMessageBox.question(self, "撤销重命名", msg,
                                 QMessageBox.Yes | QMessageBox.No,
                                 QMessageBox.No) != QMessageBox.Yes:
@@ -266,12 +276,9 @@ class HistoryPage(QWidget):
         self.reload()
 
     def open_dir(self):
-        path = A.log_dir(self._root) if self._root else ""
-        if not path or not os.path.isdir(path):
-            self.notice.set_text("这个目录还没有日志文件夹", "info")
-            self.notice.show()
-            return
+        path = A.backup_dir()
         try:
+            os.makedirs(path, exist_ok=True)
             os.startfile(path)  # noqa: S606
         except Exception as exc:
             self.notice.set_text("打不开资源管理器：%s" % exc, "warn")

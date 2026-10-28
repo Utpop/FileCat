@@ -26,10 +26,15 @@ class Result:
     steps: List = field(default_factory=list)
     log_path: str = ""
     message: str = ""
+    # 「这一步整体上算不算成功」。撤销没有 step 列表，只有 per-entry 的错误清单，
+    # 所以成败必须由调用方显式给出——否则 steps 为空时 ok 恒为 True，
+    # 撤销明明一项都没还原却被当成成功（`main.py undo` 因此错误地返回 0）。
+    success: bool = True
 
     @property
     def ok(self) -> bool:
-        return all(s.ok for s in self.steps) if self.steps else True
+        steps_ok = all(s.ok for s in self.steps) if self.steps else True
+        return self.success and steps_ok
 
     @property
     def failed(self) -> List:
@@ -94,7 +99,10 @@ def _common_base(dirs: Sequence[str]) -> str:
 def undo(log_path: str, progress=None) -> Result:
     ok, errors = C.undo(log_path, progress)
     msg = "撤销完成" if ok else "撤销有 %d 处未完成" % len(errors)
-    return Result(log_path=log_path, message=msg + ("；" + "；".join(errors) if errors else ""))
+    if errors:
+        msg += "；" + "；".join(errors)
+    # success 必须显式给：撤销没有 step 列表，ok 不能靠 steps 推
+    return Result(log_path=log_path, message=msg, success=ok)
 
 
 def export_csv(plan, path: str) -> str:

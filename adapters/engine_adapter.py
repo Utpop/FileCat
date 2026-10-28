@@ -26,6 +26,7 @@ from engine import llm as LLM
 from engine import ops as OPS
 from engine import plan as P
 from engine import presets as PS
+from engine import provider as PRV
 from engine import rules as R
 from engine import template as TPL
 from engine.cli import ONLY_CHOICES          # 与命令行共用同一张映射表
@@ -361,6 +362,15 @@ def kind_text(kind: str) -> str:
 
 # (字段, 标签, 控件, 选项/提示)
 # 控件：line / int / combo / text(多行) / bool
+#
+# 编号的标量参数（起始值 / 步长 / 补零宽度 / 编号范围）只有一处归属：规则链的
+# 链级参数节点（计划层的 PlanOptions）。「编号 / 序列化编号」规则只决定号码插在
+# 哪个位置——曾经两边各有一套起始值与补零，谁生效全看哪边非空，属于同一件事的
+# 两套输入。a / b 仍在 Rule 上保留，只用于读回旧配置（见 number_legacy）。
+_NUM_POS = [("prefix", "名字前面"), ("suffix", "名字后面"),
+            ("before", "锚点之前"), ("after", "锚点之后")]
+_SCOPES = [(s, P.SCOPE_TEXT[s]) for s in P.SCOPES]
+
 KIND_FIELDS: Dict[str, List[Tuple[str, str, str, object]]] = {
     "insert": [("a", "位置", "combo", [("prefix", "名字前面"), ("suffix", "名字后面"),
                                    ("before", "某字符之前"), ("after", "某字符之后")]),
@@ -383,10 +393,7 @@ KIND_FIELDS: Dict[str, List[Tuple[str, str, str, object]]] = {
                                      ("capitalize", "整个名字首字母大写")])],
     "trim": [("a", "要剥掉的字符集", "line", "留空 = 剥空白，并去掉结尾的点")],
     "collapse": [("a", "要合并的字符", "line", "例如一个空格")],
-    "number": [("a", "起始值", "int", "每项递增 1"),
-               ("b", "补零宽度", "int", "0 = 不补零"),
-               ("c", "位置", "combo", [("prefix", "名字前面"), ("suffix", "名字后面"),
-                                    ("before", "锚点之前"), ("after", "锚点之后")])],
+    "number": [("c", "位置", "combo", _NUM_POS)],
     "template": [("a", "模板原文", "template", "点击右侧按钮打开模板编辑器")],
     "slug": [("a", "分隔符", "line", "默认 _")],
     "translit": [],
@@ -400,8 +407,19 @@ KIND_FIELDS: Dict[str, List[Tuple[str, str, str, object]]] = {
              ("c", "插到第几个位置", "int", "")],
     "pad_numbers": [("a", "目标宽度", "int", "例如 3 会把 7 补成 007"),
                     ("b", "填充字符", "line", "默认 0")],
-    "serialize": [("a", "起始值", "int", ""), ("b", "位数", "int", ""),
-                  ("c", "位置", "combo", [("prefix", "名字前面"), ("suffix", "名字后面")])],
+    # 编号：发号与插号在同一条规则里（序列化编号已并入，选择器里不再重复列出）
+    "number": [("a", "起始值", "int", "第一个对象拿到的编号"),
+               ("extras.step", "步长", "int", "1 = 1、2、3；10 = 1、11、21"),
+               ("b", "补零宽度", "int", "0 = 不补零"),
+               ("extras.scope", "编号范围", "combo", _SCOPES),
+               ("extras.reverse", "倒序编号", "check", "从后往前发号"),
+               ("c", "位置", "combo", _NUM_POS)],
+    # 序列化：整个名字换成序号（扩展名不动），默认就是「四位 / 每文件夹从 0001 起」
+    "renumber": [("a", "起始值", "int", "第一个对象拿到的序号"),
+                 ("extras.step", "步长", "int", "1 = 0001、0002、0003"),
+                 ("b", "补零宽度", "int", "默认 4 位"),
+                 ("extras.scope", "编号范围", "combo", _SCOPES),
+                 ("extras.reverse", "倒序编号", "check", "从后往前发号")],
     "randomize": [("a", "随机串长度", "int", "默认 8"),
                   ("b", "字符集", "line", "默认 0-9a-z"),
                   ("c", "位置", "combo", [("prefix", "名字前面"), ("suffix", "名字后面")])],
@@ -428,9 +446,10 @@ KIND_FLAGS: Dict[str, set] = {
 # 扩展名严格由模板/扩展名规则/LLM 自己管，skip_ext 没有意义
 for _k in ("template", "extension", "llm"):
     KIND_FLAGS[_k] = {"selector", "occurrence"}
-# number/serialize 的分隔符是「锚点」，选择器会让两者抢同一个字段
-for _k in ("number", "serialize"):
-    KIND_FLAGS[_k] = {"skip_ext", "occurrence"}
+# number 的分隔符是「锚点」，选择器会让两者抢同一个字段
+KIND_FLAGS["number"] = {"skip_ext", "occurrence"}
+# 序列化整名就是号码，选择器与「不含扩展名」都无从谈起
+KIND_FLAGS["renumber"] = {"occurrence"}
 KIND_FLAGS["extension"] = set()
 KIND_FLAGS["remove_after"] = {"selector", "skip_ext", "occurrence", "keep_sep"}
 KIND_FLAGS["remove_before"] = {"selector", "skip_ext", "occurrence", "keep_sep"}
@@ -439,7 +458,7 @@ RULE_GROUPS: List[Tuple[str, List[str]]] = [
     ("增删", ["insert", "delete", "remove_chars", "replace", "regex"]),
     ("切取", ["keep_after", "keep_before", "remove_after", "remove_before"]),
     ("修饰", ["prefix", "suffix", "case", "trim", "collapse"]),
-    ("编号与序列", ["number", "serialize", "pad_numbers", "randomize", "date_insert"]),
+    ("编号与序列", ["number", "renumber", "pad_numbers", "randomize", "date_insert"]),
     ("模板与规范化", ["template", "slug", "translit", "filename_clean", "move",
                  "hash", "extension"]),
     ("智能", ["llm"]),
@@ -453,8 +472,11 @@ DEFAULTS: Dict[str, dict] = {
     "remove_after": {"a": "-"}, "remove_before": {"a": "-"},
     "prefix": {"a": "新_"}, "suffix": {"a": "_备份"},
     "insert": {"a": "suffix", "b": "", "c": "补充"},
-    "number": {"a": "1", "b": "3", "c": "prefix"},
-    "serialize": {"a": "1", "b": "4", "c": "prefix"},
+    "number": {"a": "1", "extras.step": "1", "b": "", "extras.scope": "global",
+               "extras.reverse": "", "c": "prefix"},
+    # 与内置预设「照片序号（四位）」一致：四位、每个文件夹各自从 0001 起
+    "renumber": {"a": "1", "extras.step": "1", "b": "4", "extras.scope": "folder",
+                 "extras.reverse": ""},
     "template": {"a": "{n}"},
     "case": {"a": "lower"},
     "pad_numbers": {"a": "3"},
@@ -473,6 +495,10 @@ def new_rule(kind: str) -> R.Rule:
     """按真实默认值造一条规则；id 由引擎生成（跨进程稳定）。"""
     d = DEFAULTS.get(kind, {})
     rule = R.make_rule(kind, d.get("a", ""), d.get("b", ""), d.get("c", ""))
+    # 带点号的键落到 extras（编号规则的步长 / 编号范围 / 倒序就住在这里）
+    for key, value in d.items():
+        if "." in key:
+            set_field(rule, key, value)
     if kind == "llm":
         rule.extras.setdefault("lang", "zh")
         rule.extras.setdefault("max_len", "24")
@@ -554,8 +580,9 @@ def rule_problems(rule: R.Rule) -> List[str]:
                 probs.append("正则不合法：%s" % exc)
     if kind == "template":
         need(a, "模板原文")
-    if kind in ("number", "serialize"):
-        for key, val, label in (("a", a, "起始值"), ("b", b, "宽度/位数")):
+    if kind in ("number", "renumber"):
+        for key, val, label in (("a", a, "起始值"), ("b", b, "补零宽度"),
+                                ("extras.step", get_field(rule, "extras.step"), "步长")):
             if str(val).strip():
                 try:
                     int(val)
@@ -711,7 +738,10 @@ def preset_dir() -> str:
 # --------------------------------------------------------------------------- #
 
 def logs(root: str) -> List[dict]:
-    """把 `_rename_logs` 下的日志读成界面要用的行。字段全部来自真实 schema。"""
+    """把撤销日志读成界面要用的行。字段全部来自真实 schema。
+
+    root 给了 = 只看那个目标目录的；root 空 = 全部（所有目录的日志混在一起）。
+    """
     rows = []
     for path in C.list_logs(root or ""):
         try:
@@ -748,7 +778,13 @@ def temp_leftovers(root: str) -> List[str]:
 
 
 def log_dir(root: str) -> str:
+    """撤销日志的存放目录（统一的一个，与目标目录无关）。"""
     return C.log_dir(root or "")
+
+
+def backup_dir() -> str:
+    """撤销日志文件夹的完整路径（`<程序目录>\\Name_backup`）。"""
+    return C.log_dir("")
 
 
 # --------------------------------------------------------------------------- #
@@ -756,7 +792,13 @@ def log_dir(root: str) -> str:
 # --------------------------------------------------------------------------- #
 
 def llm_config(provider: str = "", model: str = "", batch: int = 0) -> "LLM.LLMConfig":
-    cfg = LLM.LLMConfig.from_env()
+    """最终生效的接入配置。
+
+    优先级：界面保存的供应商配置 > 环境变量 > 内置默认值。
+    界面上保存过一次供应商配置之后，就完全以那份配置为准；没保存过则走
+    环境变量，老用户的行为不变。
+    """
+    cfg = PRV.effective_config()
     if provider:
         cfg.provider = provider
     if model:
@@ -768,6 +810,142 @@ def llm_config(provider: str = "", model: str = "", batch: int = 0) -> "LLM.LLMC
 
 def llm_client(provider: str = "", model: str = "", batch: int = 0):
     return LLM.make_client(llm_config(provider, model, batch))
+
+
+def llm_client_config(cfg):
+    """按界面上的供应商配置造客户端（cfg 为 None 时用当前生效的配置）。"""
+    if cfg is None:
+        return LLM.make_client(llm_config())
+    return LLM.make_client(llm_config_from_provider(cfg))
+
+
+# --------------------------------------------------------------------------- #
+# 供应商配置（界面「LLM 设置」页的全部读写都走这里）
+# --------------------------------------------------------------------------- #
+
+def llm_provider_config() -> "PRV.ProviderConfig":
+    """界面上显示的那一份供应商配置。
+
+    保存过就以保存的为准；从没保存过则用环境变量兜底，老用户看到的还是熟悉的那套。
+    """
+    return PRV.effective_provider_config()
+
+
+def llm_save_provider_config(cfg, api_key: Optional[str] = None) -> str:
+    """保存供应商配置；api_key 为 None 表示不动已保存的密钥。"""
+    return PRV.save_config(cfg, api_key)
+
+
+def llm_provider_presets() -> List[Tuple[str, str]]:
+    """供应商预设（界面下拉框用）。"""
+    return [(p.key, p.label) for p in PRV.PROVIDER_PRESETS]
+
+
+def llm_provider_preset_notes() -> Dict[str, str]:
+    """每个预设的一句话说明。"""
+    return {p.key: p.note for p in PRV.PROVIDER_PRESETS}
+
+
+def llm_protocols() -> List[Tuple[str, str]]:
+    """协议列表（界面下拉框用）。"""
+    return list(PRV.PROTOCOLS)
+
+
+def llm_protocol_text(protocol: str) -> str:
+    """协议代号 → 人话名字。"""
+    return PRV.PROTOCOL_TEXT.get(protocol or "", protocol or "")
+
+
+# 预设 → 引擎客户端类型（界面按预设换客户端）
+PRV_KIND = {p.key: p.kind for p in PRV.PROVIDER_PRESETS}
+
+
+def llm_config_from_provider(cfg) -> "LLM.LLMConfig":
+    """把供应商配置翻译成引擎的接入配置。"""
+    return LLM.LLMConfig(
+        provider=(cfg.kind or "openai"),
+        base_url=cfg.base_url,
+        api_key=cfg.api_key,
+        model=cfg.model,
+        timeout=int(cfg.timeout),
+        batch=int(cfg.batch),
+        temperature=float(cfg.temperature),
+        protocol=cfg.protocol,
+        headers=dict(cfg.headers or {}),
+        max_tokens=int(cfg.max_tokens),
+    )
+
+
+def llm_apply_preset(cfg, preset_key: str):
+    """套用供应商预设，返回新的配置对象（不落盘）。"""
+    return PRV.apply_preset(cfg, preset_key)
+
+
+def llm_models_url(cfg) -> str:
+    return PRV.models_url_for(cfg)
+
+
+def llm_fetch_models(cfg) -> Tuple[List[str], str]:
+    """拉取模型列表。返回 (模型名, 错误原因)。"""
+    return PRV.list_models(cfg)
+
+
+def llm_test_connection(cfg) -> dict:
+    """测试供应商连通性：真发一个请求，返回耗时与原因。"""
+    return PRV.test_connection(cfg)
+
+
+def llm_status() -> dict:
+    """供应商连接状态（界面左下角的气泡显示的就是它）。"""
+    snap = PRV.STATUS.snapshot()
+    if not snap.get("model"):
+        snap["model"] = llm_provider_config().model
+    return snap
+
+
+def llm_status_set_model(model: str):
+    """把当前生效的模型名记进状态（气泡第一行显示它）。"""
+    PRV.STATUS.set_model(model)
+
+
+def llm_status_mark_unknown(model: str = ""):
+    """配置改了但还没重新测：状态回到"未知"，别拿旧结果说事。"""
+    PRV.STATUS.mark_unknown(model)
+
+
+def llm_provider_key_saved() -> bool:
+    """本地是否已经保存过密钥（界面只显示"已保存"，绝不回显内容）。"""
+    return PRV.secrets.has_secret()
+
+
+def llm_provider_config_path() -> str:
+    return PRV.config_path()
+
+
+def llm_provider_config_saved() -> bool:
+    """界面上是不是已经保存过本机配置（没保存过就还认环境变量）。"""
+    return os.path.isfile(PRV.config_path())
+
+
+def llm_save_headers(text: str) -> Dict[str, str]:
+    """把"每行一条 Key: Value"解析成请求头字典。"""
+    out: Dict[str, str] = {}
+    for line in str(text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        if key:
+            out[key] = value.strip()
+    return out
+
+
+def llm_headers_to_text(headers: Dict[str, str]) -> str:
+    """请求头字典转回"每行一条 Key: Value"。"""
+    return "\n".join("%s: %s" % (k, v) for k, v in (headers or {}).items())
 
 
 def llm_env_sources() -> List[Tuple[str, str, bool]]:

@@ -2,13 +2,14 @@
 """
 verify/ui_smoke.py —— 界面交互级冒烟（离屏，不需要显示器）。
 
-把界面上每个可点的地方都走一遍：27 种规则逐条添加、规则选择弹窗、高级筛选、
+把界面上每个可点的地方都走一遍：每种规则逐条添加、规则选择弹窗、高级筛选、
 编号选项、扫描→算名→勾选→CSV→执行→撤销、预设应用/保存/删除、LLM 页。
 任何一步抛异常都会打印堆栈并以退出码 1 结束。
 
     py -3 verify/ui_smoke.py
 """
 import os
+import shutil
 import sys
 import tempfile
 import traceback
@@ -16,6 +17,10 @@ import traceback
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# 撤销日志统一存在程序目录的 Name_backup 里；自检把它指到临时目录，
+# 否则跑一次冒烟就会往程序目录里塞日志文件
+_TMP_LOGS = os.path.join(tempfile.gettempdir(), "namecat_ui_smoke_logs")
+os.environ["NAMECAT_LOG_DIR"] = _TMP_LOGS
 
 from PySide6.QtCore import QEventLoop, QTimer  # noqa: E402
 from PySide6.QtWidgets import (QApplication, QDialog, QMessageBox,  # noqa: E402
@@ -66,7 +71,7 @@ w.show()
 app.processEvents()
 ws = w.page_ws
 
-print("== 2. 添加规则（27 种全走一遍）==")
+print("== 2. 添加规则（全部种类全走一遍）==")
 tmpdir = tempfile.mkdtemp(prefix="nc_bug_")
 from engine.rules import RULE_KINDS  # 只为拿全量 kind 列表做遍历
 for kind, text, _params, _note in RULE_KINDS:
@@ -98,11 +103,26 @@ def advanced():
 
 step("AdvancedDialog 构造/应用", advanced)
 
-print("== 5. 编号选项弹窗（构建阶段）==")
-_orig_exec = QDialog.exec
-QDialog.exec = lambda self, *a, **k: QDialog.Rejected
-step("_edit_plan_options 构建", ws._edit_plan_options)
-QDialog.exec = _orig_exec
+print("== 5. 编号规则：发号 + 插号同一条 ==")
+
+
+def number_rule():
+    rule = A.new_rule("number")
+    ws.rules = [rule]
+    ws.selected_id = rule.id
+    ws._refresh_rules()                      # 属性面板要能装下这一整条（不挤不溢）
+    A.set_field(rule, "extras.step", "2")
+    A.set_field(rule, "extras.reverse", "1")
+    A.set_field(rule, "b", "3")
+    ws._refresh_rules()
+    assert A.get_field(rule, "extras.step") == "2"
+    assert A.get_field(rule, "extras.reverse") == "1"
+    A.set_field(rule, "extras.reverse", "")  # 关掉倒序
+    ws._refresh_rules()
+    assert A.get_field(rule, "extras.reverse") == ""
+
+
+step("编号规则参数（起始/步长/补零/范围/倒序）", number_rule)
 
 print("== 5b. 可点区域点击信号（防止事件覆盖失效回归）==")
 from PySide6.QtTest import QTest  # noqa: E402
@@ -112,15 +132,13 @@ def click_sigs():
     from PySide6.QtCore import Qt as Qta
     # 直接点：处理器会弹模态框，所以用记录桩验证「点击 → 处理器」这条链
     called = []
-    ws._edit_plan_options, ws._advanced = (lambda: called.append("opt")), \
-                                         (lambda: called.append("adv"))
-    QTest.mouseClick(ws.optbar, Qta.LeftButton)
+    ws._advanced = lambda: called.append("adv")
     QTest.mouseClick(ws.adv_holder, Qta.LeftButton)
-    assert called == ["opt", "adv"], called
+    assert called == ["adv"], called
     assert isinstance(w.findChild(QWidget, "HelpBtn"), QPushButton), "帮助按钮应存在"
 
 
-step("OptBar / 高级筛选 点击", click_sigs)
+step("高级筛选 点击", click_sigs)
 
 print("== 6. 扫描 → 算名 ==")
 for i in range(1, 4):
@@ -168,6 +186,22 @@ w._goto(2)
 w.page_history.set_root(tmpdir)
 wait_until(lambda: bool(w.page_history._rows), 6000)
 print("   日志条数：", len(w.page_history._rows))
+
+
+def history_all():
+    # 日志统一存在 Name_backup 里，不给目录 = 看全部目录的日志
+    w.page_history.set_root("")
+    wait_until(lambda: bool(w.page_history._rows), 6000)
+    assert w.page_history._rows, "全部目录里应有日志"
+    assert not os.path.isdir(os.path.join(tmpdir, "_rename_logs")), \
+        "目标目录里不该再留 _rename_logs"
+    # 自检把日志目录指到了临时目录（NAMECAT_LOG_DIR），所以这里查的是那个
+    assert os.path.isdir(A.backup_dir()), "统一的备份目录应存在"
+    assert A.backup_dir() == _TMP_LOGS, "备份目录应遵循 NAMECAT_LOG_DIR"
+
+
+step("执行记录（全部目录）", history_all)
+
 step("撤销", lambda: (w.page_history._undo(w.page_history._rows[0]),
                     wait_until(lambda: not w.page_history.runner.busy(), 8000)))
 print("   撤销后目录：", sorted(os.listdir(tmpdir))[:6])
@@ -208,6 +242,7 @@ step("LLM 页刷新", llm_page)
 
 print("== 13. 收尾 ==")
 w.close()
+shutil.rmtree(_TMP_LOGS, ignore_errors=True)
 print()
 if FAILS:
     print("失败 %d 项：" % len(FAILS))
@@ -216,4 +251,4 @@ if FAILS:
         print(name)
         print(tb)
     sys.exit(1)
-print("全部通过（27 种规则 + 全流程 + 撤销 + 预设 + LLM）")
+print("全部通过（全部规则 + 全流程 + 撤销 + 预设 + LLM）")

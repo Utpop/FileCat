@@ -4,7 +4,7 @@ ui.base —— 设计令牌、字体、图标与基础控件（新界面的公�
 
 设计基准
     · 逻辑画布 1440×900，全部尺寸为逻辑像素（dp），由 Qt 按屏幕 DPI 换算成物理像素；
-    · 字体为仓库自带的 HarmonyOS Sans SC 可变字体，400/500/600 三档取真实字形；
+    · 字体用系统自带 UI 字体（Windows 的 Microsoft YaHei UI 等），字重收敛到 Regular/Bold 两档；
     · 颜色、圆角、字号只在本文件顶部 TOKENS 区定义一次。
 
 这里只放“长什么样”的东西：令牌、字体、图标、基础控件。
@@ -51,37 +51,71 @@ C = {
     "warn": "#B45309", "warn_bg": "#FFFBEB",
     "err": "#DC2626", "err_bg": "#FEF2F2",
     "info": "#2563EB", "info_bg": "#EFF6FF",
+    # 状态点（小圆点用的纯色，比文字色亮一档才看得见）
+    "ok_dot": "#22C55E", "off_dot": "#D4D4D4",
+    # 主行动按钮（开始扫描 / 执行重命名）：蓝底白字，比普通按钮更重
+    "brand": "#3660F4", "brand_hi": "#2851E3", "brand_lo": "#1E44CC",
+    "brand_off": "#A9B8F8",
+    # 选中态：浅蓝底 + 品牌蓝文字（侧栏当前页、规则链当前行）
+    "brand_soft": "#EBF0FE", "brand_soft_hi": "#E0E9FE",
 }
 
 R_CARD, R_SM, R_XS = 6, 5, 4
-FONT_FILE = os.path.join(HERE, "fonts", "HarmonyOS_Sans_SC.ttf")
-FAMILY = "HarmonyOS Sans SC"
+# 界面字体用**系统自带 UI 字体**，不再随包分发字体文件（见 load_fonts 的说明）。
+# 空串 = 交给 Qt 默认字体；load_fonts() 会挑一个系统里确实存在的家族。
+FAMILY = ""
+SYSTEM_FONT_CANDIDATES = ("Microsoft YaHei UI", "Microsoft YaHei",
+                          "PingFang SC", "Noto Sans CJK SC", "Segoe UI")
+# 系统字体的字重数量不一（Windows 雅黑只有 Regular/Bold，请求 500/600 都会
+# 落到 Regular）。界面上的强调不能靠合成加粗（那会让密集汉字糊掉），所以把字重
+# 收敛到**系统字体真实存在**的两档，并且按字号决定要不要加粗：
+#   · ≤450            → Regular(400)   正文
+#   · >450 且字号 <16 → Regular(400)   小标题/按钮/徽章：靠字号与颜色分层级，
+#                                     不加粗——小字号中文一加粗，笔画间隙就被
+#                                     吃掉，「重/藏/整/置」这类字尤其糊
+#   · >450 且字号 ≥16 → Bold(700)      大标题（页面标题 22px 等）才加粗
+WEIGHT_MAP = ((450, 400), (10000, 700))
+BOLD_MIN_SIZE = 16
 
 WIN_W, WIN_H = 1440, 900
 HEADER_H, SIDEBAR_W, STATUS_H = 56, 204, 28
 MARGIN_X, MARGIN_T, MARGIN_B, GAP = 20, 18, 12, 12
 
-APP_TITLE = "NameCat 1.2.0"
-
-
 # --------------------------------------------------------------------------- #
 # 字体与图标
 # --------------------------------------------------------------------------- #
 
+def map_weight(weight: int, size: int = 12) -> int:
+    """把界面字重映射到系统字体真实存在的字重（避免合成加粗）。
+
+    小字号一律不加粗：中文横画密集，Bold 在 13~15px 下笔画间隙会被吃掉，
+    看着又厚又糊；大标题（≥ BOLD_MIN_SIZE）才保留 Bold 的分量。
+    """
+    if weight <= WEIGHT_MAP[0][0]:
+        return WEIGHT_MAP[0][1]
+    return 700 if size >= BOLD_MIN_SIZE else 400
+
+
 def load_fonts() -> str:
-    """注册随包字体；失败时退回系统无衬线，界面不会崩。"""
-    fid = QFontDatabase.addApplicationFont(FONT_FILE)
-    if fid >= 0:
-        fams = QFontDatabase.applicationFontFamilies(fid)
-        if fams:
-            return fams[0]
-    return "Microsoft YaHei UI"
+    """挑一个系统自带的 UI 字体；挑不到就返回空串（用 Qt 默认字体）。
+
+    只认「系统里真的有」的家族：QFontDatabase.families() 列不出来的一律跳过，
+    免得请求一个不存在的家族、被静默回退成别的字体还看不出来。
+    """
+    try:
+        available = set(QFontDatabase.families())
+    except Exception:                      # 字体后端异常时别让界面起不来
+        available = set()
+    for fam in SYSTEM_FONT_CANDIDATES:
+        if fam in available:
+            return fam
+    return ""
 
 
 def F(size: int, weight: int = 400, spacing: float = 0.0) -> QFont:
-    f = QFont(FAMILY)
+    f = QFont(FAMILY) if FAMILY else QFont()
     f.setPixelSize(size)
-    f.setWeight(QFont.Weight(weight))
+    f.setWeight(QFont.Weight(map_weight(weight, size)))
     f.setStyleStrategy(QFont.PreferAntialias)
     if spacing:
         f.setLetterSpacing(QFont.AbsoluteSpacing, spacing)
@@ -139,6 +173,16 @@ ICONS = {
     "file": '<path d="M6.2 4.4h7.4l4.2 4.2v11H6.2Z"/><path d="M13.4 4.4v4.4h4.4"/>',
     "expand": '<path d="M9.2 4.6H4.6v4.6"/><path d="M14.8 4.6h4.6v4.6"/>'
               '<path d="M14.8 19.4h4.6v-4.6"/><path d="M9.2 19.4H4.6v-4.6"/>',
+    "doc": '<rect x="4.9" y="4.4" width="14.2" height="15.2" rx="2.2"/>'
+           '<path d="M8.5 9.4h7M8.5 12.4h7M8.5 15.4h4.4"/>',
+    "pencil": '<path d="M4.7 19.3l1.1-4.3L15.9 4.9a2 2 0 0 1 2.8 0l.4.4a2 2 0 0 1 0 2.8'
+              'L8.9 18.2z"/><path d="M14.9 5.9l3.2 3.2"/>',
+    "inbox": '<path d="M5.4 5.4h13.2a1.2 1.2 0 0 1 1.2 1.2v10.8a1.2 1.2 0 0 1-1.2 1.2H5.4'
+             'a1.2 1.2 0 0 1-1.2-1.2V6.6a1.2 1.2 0 0 1 1.2-1.2Z"/>'
+             '<path d="M4.2 12.4h4.4l1.2 1.8h4.4l1.2-1.8h4.4"/>',
+    "check_square": '<rect x="4.6" y="4.6" width="14.8" height="14.8" rx="3.2"/>'
+                    '<path d="M8.4 12.2l2.6 2.6 4.8-5"/>',
+    "square": '<rect x="4.6" y="4.6" width="14.8" height="14.8" rx="3.2"/>',
     "shrink": '<path d="M4.6 9.2h4.6V4.6"/><path d="M19.4 9.2h-4.6V4.6"/>'
               '<path d="M19.4 14.8h-4.6v4.6"/><path d="M4.6 14.8h4.6v4.6"/>',
 }
@@ -256,21 +300,31 @@ def hbox(target=None, m=0, s=0):
 
 
 class Button(QPushButton):
-    """34 高普通按钮 / primary 主按钮 / sm 26 / mid 30。"""
+    """34 高普通按钮 / primary 主按钮（黑）/ cta 主行动（蓝）/ sm 26 / mid 30。"""
 
     def __init__(self, text="", name="", kind="normal", icon_color=None, parent=None, icon_px=14):
         super().__init__(text, parent)
         self._kind = kind
         self.setCursor(Qt.PointingHandCursor)
-        self.setFont(F(12 if kind in ("sm", "mid") else 13, 400 if kind == "normal" else 500))
-        obj = {"normal": "Btn", "primary": "BtnPrimary", "sm": "BtnSm",
+        # 按钮文字 14px（比正文令牌 13px 大一档）：13px 下「重」这类密集横画的
+        # 笔画间隙偏窄，实测 14px 笔画对比度 +18%。字重、颜色、高度一律不动。
+        self.setFont(F(12 if kind in ("sm", "mid", "sm_brand", "sm_soft") else 14,
+                       400 if kind == "normal" else 500))
+        obj = {"normal": "Btn", "primary": "BtnPrimary", "cta": "BtnCta",
+               "sm": "BtnSm", "sm_brand": "BtnSmBrand", "sm_soft": "BtnSmSoft",
                "mid": "BtnMid", "text": "BtnText"}[kind]
         self.setObjectName(obj)
         if name:
-            col = "#FFFFFF" if kind == "primary" else (icon_color or C["t1"])
+            if kind in ("primary", "cta"):
+                col = "#FFFFFF"
+            elif kind == "sm_brand":
+                col = icon_color or C["brand"]
+            else:
+                col = icon_color or C["t1"]
             self.setIcon(icon(name, col, icon_px))
             self.setIconSize(QSize(icon_px, icon_px))
-        h = {"normal": 34, "primary": 34, "sm": 26, "mid": 30, "text": 18}[kind]
+        h = {"normal": 34, "primary": 34, "cta": 34, "sm": 26, "sm_brand": 26,
+             "sm_soft": 26, "mid": 30, "text": 18}[kind]
         self.setFixedHeight(h)
         if kind == "text":
             self.setFlat(True)
@@ -338,21 +392,45 @@ class Badge(QLabel):
 
 
 class Chip(QWidget):
+    """摘要胶囊：数字为 0 时一律灰，只有真的有数才亮出对应语气。
+
+    一排六个彩色胶囊太吵，读的人真正关心的是"哪个不为 0"。
+    """
+
+    TONES = {
+        "muted": (C["s2"], C["t2"]), "ok": (C["ok_bg"], C["ok"]),
+        "warn": (C["warn_bg"], C["warn"]), "err": (C["err_bg"], C["err"]),
+        "info": (C["info_bg"], C["info"]),
+    }
+
     def __init__(self, label, value, tone="muted", parent=None):
         super().__init__(parent)
-        bg, fg = {
-            "muted": (C["s2"], C["t2"]), "ok": (C["ok_bg"], C["ok"]),
-            "warn": (C["warn_bg"], C["warn"]), "err": (C["err_bg"], C["err"]),
-            "info": (C["info_bg"], C["info"]),
-        }[tone]
-        self.setStyleSheet("QWidget{background:%s;border-radius:%dpx;}" % (bg, R_XS))
+        self._tone = tone
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setFixedHeight(26)
         lay = hbox(self, (8, 0, 8, 0), 6)
-        lay.addWidget(Label(label, 11, 400, fg), 0, Qt.AlignVCenter)
-        self.val = Label(str(value), 12, 600, fg if tone != "muted" else C["t1"])
+        self.lab = Label(label, 11, 400, C["t2"])
+        lay.addWidget(self.lab, 0, Qt.AlignVCenter)
+        self.val = Label(str(value), 12, 600, C["t1"])
         lay.addWidget(self.val, 0, Qt.AlignVCenter)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.set_value(value)
+
+    def set_value(self, value):
+        """0 → 灰；不为 0 才用它自己的语气色。"""
+        self.val.setText(str(value))
+        try:
+            busy = int(value) != 0
+        except (TypeError, ValueError):
+            busy = bool(value)
+        self._apply(self._tone if busy else "muted")
+
+    def _apply(self, tone):
+        bg, fg = self.TONES.get(tone, self.TONES["muted"])
+        self.setStyleSheet("QWidget{background:%s;border-radius:%dpx;}" % (bg, R_XS))
+        self.lab.setStyleSheet("color:%s;background:transparent;" % fg)
+        self.val.setStyleSheet("color:%s;background:transparent;"
+                               % (C["t1"] if tone == "muted" else fg))
 
 
 class NoticeBar(QFrame):
@@ -482,8 +560,38 @@ def grid_row(items, height, pad=(0, 8), spacing=0, holder=None):
 
 
 # --------------------------------------------------------------------------- #
-# 页面通用：页头
+# 页面通用：空状态与页头
 # --------------------------------------------------------------------------- #
+
+class EmptyState(QWidget):
+    """卡片里的空状态：淡色图标 + 标题 + 一句说明，在可用空间里垂直居中。
+
+    图标描边比常规图标细（1.3 而不是 1.6）：空状态是"占位"不是"按钮"，
+    线条要退到背景里去。
+    """
+
+    def __init__(self, icon_name, title, hint, parent=None):
+        super().__init__(parent)
+        lay = vbox(self, (18, 0, 18, 0), 0)
+        lay.addStretch(1)
+        ic = QLabel()
+        ic.setPixmap(svg_pixmap(icon_name, "#C4C4C4", 40, weight=1.3))
+        ic.setFixedSize(40, 40)
+        ic.setAlignment(Qt.AlignCenter)
+        lay.addWidget(ic, 0, Qt.AlignHCenter)
+        lay.addSpacing(10)
+        head = Label(title, 15, 600, C["t1"])
+        head.setAlignment(Qt.AlignCenter)
+        # 整行宽度交给标签：带对齐标记加进去会按单行宽度给它，长句子就被裁掉而不是换行
+        lay.addWidget(head)
+        lay.addSpacing(6)
+        hint_label = Label(hint, 12, 400, C["t3"])
+        hint_label.setAlignment(Qt.AlignCenter)
+        hint_label.setWordWrap(True)
+        hint_label.setMinimumWidth(0)
+        lay.addWidget(hint_label)
+        lay.addStretch(1)
+
 
 class PageHead(QWidget):
     def __init__(self, title, subtitle, actions, parent=None):
@@ -550,22 +658,9 @@ class Clickable(QWidget):
         super().mousePressEvent(e)
 
 
-class OptBar(Strip):
-    """「编号与执行选项」折叠条：整条可点，点击发 clicked。"""
-
-    clicked = Signal()
-
-    def __init__(self, parent=None):
-        super().__init__(C["s1"], R_CARD, parent)
-
-    def mousePressEvent(self, e):  # noqa: N802
-        if e.button() == Qt.LeftButton:
-            self.clicked.emit()
-        super().mousePressEvent(e)
-
-
 SCROLL_QSS = """
 QScrollArea { background: transparent; border: 0; }
+QScrollArea > QWidget > QWidget { background: transparent; }
 QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
 QScrollBar::handle:vertical { background: %s; border-radius: 5px; min-height: 32px; }
 QScrollBar::handle:vertical:hover { background: %s; }
@@ -582,6 +677,9 @@ def scroll_area(widget, min_height=0, padding_right=0):
     area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
     area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
     area.setStyleSheet(SCROLL_QSS)
+    # 视口默认会用自己的底色（灰）刷一遍，卡片的白底透不上来 —— 关掉它
+    area.viewport().setAutoFillBackground(False)
+    widget.setAutoFillBackground(False)
     if padding_right:
         area.setViewportMargins(0, 0, padding_right, 0)
     area.setWidget(widget)
@@ -590,11 +688,64 @@ def scroll_area(widget, min_height=0, padding_right=0):
     return area
 
 
+class LlmBubble(QWidget):
+    """左下角的 LLM 状态气泡：一行模型名 + 一行连接情况。
+
+    放在侧栏底部（导航项下面、状态栏上面），宽度跟着侧栏走。
+    颜色分工（跟全局一致）：绿色 = 连上了，灰色 = 没配置/没测过，
+    红色 = 连不上。点一下就去「供应商配置」页。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("LlmBubble")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setFixedHeight(56)
+        # 宽度随侧栏：不能写死，侧栏内宽只有 180，写死就撑出去了
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        lay = vbox(self, (10, 9, 10, 9), 3)
+
+        top = hbox(None, 0, 6)
+        self.dot = QLabel()
+        self.dot.setFixedSize(7, 7)
+        self.dot.setStyleSheet("background:%s;border-radius:3px;" % C["off_dot"])
+        top.addWidget(self.dot, 0, Qt.AlignVCenter)
+        self.model = Elided("未配置 LLM", 12, 500, C["t1"])
+        self.model.setMinimumWidth(0)
+        top.addWidget(self.model, 1, Qt.AlignVCenter)
+        lay.addLayout(top)
+
+        self.detail = Elided("去「供应商配置」里设置", 11, 400, C["t3"])
+        self.detail.setMinimumWidth(0)
+        lay.addWidget(self.detail)
+
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("点击打开「供应商配置」页")
+
+    def set_state(self, state: str, model: str = "", detail: str = ""):
+        """state: unset（没配置）/ unknown（没测过）/ ok（连上了）/ error（连不上）。"""
+        color = {"ok": C["ok_dot"], "error": C["err"],
+                 "unknown": C["warn"]}.get(state, C["off_dot"])
+        self.dot.setStyleSheet("background:%s;border-radius:3px;" % color)
+        self.model.setText(model or "未配置 LLM")
+        self.detail.setText(detail or "去「供应商配置」里设置")
+        self.setToolTip(detail or "点击打开「供应商配置」页")
+
+    def mousePressEvent(self, e):  # noqa: N802
+        if e.button() == Qt.LeftButton:
+            window = self.window()
+            goto = getattr(window, "goto_llm_page", None)
+            if callable(goto):
+                goto()
+        super().mousePressEvent(e)
+
+
 class NavButton(QAbstractButton):
     """侧栏导航项：自绘，保证图标/文字基线与设计稿一致。"""
 
     def __init__(self, icon_name, text, height=40, size=13, icon_size=17,
-                 pad=10, gap=10, muted=False, checkable=True, parent=None):
+                 pad=10, gap=10, parent=None):
         super().__init__(parent)
         self._ic = icon_name
         self._txt = text
@@ -602,9 +753,8 @@ class NavButton(QAbstractButton):
         self._isz = icon_size
         self._pad = pad
         self._gap = gap
-        self._muted = muted
         self._hover = False
-        self.setCheckable(checkable)
+        self.setCheckable(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedHeight(height)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -624,19 +774,18 @@ class NavButton(QAbstractButton):
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         if on:
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(C["sel"]))
+            p.setBrush(QColor(C["brand_soft_hi"] if self._hover else C["brand_soft"]))
             p.drawRoundedRect(rect, R_CARD, R_CARD)
         elif self._hover:
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(C["s2"]))
             p.drawRoundedRect(rect, R_CARD, R_CARD)
-        if self._muted:
-            color = C["t3"] if not self._hover else C["t2"]
-        else:
-            color = C["t1"] if on else C["t2"]
+        # 选中：底色浅蓝 + 文字品牌蓝，图标仍留灰（字是主角，别让图标抢）
+        icon_color = C["t2"]
+        text_color = C["brand"] if on else C["t2"]
         y = (self.height() - self._isz) / 2.0
-        p.drawPixmap(int(self._pad), int(y), svg_pixmap(self._ic, color, self._isz))
-        p.setPen(QColor(color))
+        p.drawPixmap(int(self._pad), int(y), svg_pixmap(self._ic, icon_color, self._isz))
+        p.setPen(QColor(text_color))
         p.setFont(F(self._fs, 500 if on else 400))
         left = self._pad + self._isz + self._gap
         p.drawText(QRectF(left, 0, self.width() - left - 6, self.height()),

@@ -33,13 +33,15 @@ engine.llm —— 大模型改名建议层（"智能精简文件名"）。
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 # --------------------------------------------------------------------------- #
 # 默认要求（可被使用者整段改写）
@@ -178,6 +180,12 @@ class LLMConfig:
     batch: int = DEFAULT_BATCH
     temperature: float = 0.2
     max_retries: int = 2
+    # 协议：openai_chat（/chat/completions）/ openai_responses（/responses）
+    #       / anthropic_messages（/messages）
+    protocol: str = "openai_chat"
+    # 额外请求头（界面「自定义请求头」）：同名以这里为准
+    headers: Dict[str, str] = field(default_factory=dict)
+    max_tokens: int = 1024
 
     @classmethod
     def from_env(cls, **override) -> "LLMConfig":
@@ -204,6 +212,17 @@ class LLMConfig:
             model=pick("NAMECAT_LLM_MODEL", "NAMEKIT_LLM_MODEL", "NAMEXIT_LLM_MODEL",
                        "OPENAI_MODEL", "DEEPSEEK_MODEL", default=DEFAULT_MODEL),
         )
+        proto = pick("NAMECAT_LLM_PROTOCOL", "NAMEKIT_LLM_PROTOCOL", default="")
+        if proto:
+            cfg.protocol = proto
+        raw_headers = pick("NAMECAT_LLM_HEADERS", "NAMEKIT_LLM_HEADERS", default="")
+        if raw_headers:
+            try:
+                loaded = json.loads(raw_headers)
+            except (ValueError, TypeError):
+                loaded = None
+            if isinstance(loaded, dict):
+                cfg.headers = {str(k): str(v) for k, v in loaded.items() if str(k).strip()}
         for k, v in override.items():
             if v is not None and hasattr(cfg, k):
                 setattr(cfg, k, v)
@@ -445,28 +464,94 @@ class LLMClient:
 
 
 class HttpChatClient(LLMClient):
-    """OpenAI 兼容 /v1/chat/completions（DeepSeek、Qwen、Moonshot、vLLM…）。"""
+    """OpenAI 兼容接口。
+
+    支持三种协议（界面「协议」下拉框里选）：
+        · openai_chat       POST {base}/chat/completions
+        · openai_responses  POST {base}/responses
+        · anthropic_messages POST {base}/messages（鉴权头换成 x-api-key）
+
+    任何一种协议，回复的最后都归一成"一段文本"，上层解析逻辑不用改。
+    """
 
     name = "openai"
 
     def _endpoint(self) -> str:
         base = (self.config.base_url or "").rstrip("/")
+        if self.config.protocol == "anthropic_messages":
+            if base.endswith("/messages"):
+                return base
+            if re.search(r"/v\d+$", base):
+                return base + "/messages"
+            return base + "/v1/messages"
+        if self.config.protocol == "openai_responses":
+            if base.endswith("/responses"):
+                return base
+            if re.search(r"/v\d+$", base):
+                return base + "/responses"
+            return base + "/v1/responses"
         if base.endswith("/chat/completions"):
             return base
         if re.search(r"/v\d+$", base):
             return base + "/chat/completions"
         return base + "/v1/chat/completions"
 
+    def _headers(self) -> Dict[str, str]:
+        head = {"Content-Type": "application/json",
+                "Accept": "application/json"}
+        if self.config.protocol == "anthropic_messages":
+            if self.config.api_key:
+                head["x-api-key"] = self.config.api_key
+                head["anthropic-version"] = "2023-06-01"
+        else:
+            head["Authorization"] = "Bearer %s" % self.config.api_key
+        for key, value in (self.config.headers or {}).items():
+            if str(key).strip():
+                head[str(key).strip()] = str(value)
+        return head
+
     def _post(self, payload: dict) -> dict:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(
             self._endpoint(), data=body, method="POST",
-            headers={"Content-Type": "application/json",
-                     "Authorization": "Bearer %s" % self.config.api_key})
-        with urllib.request.urlopen(req, timeout=self.config.timeout) as fh:
-            return json.loads(fh.read().decode("utf-8", "replace"))
+            headers=self._headers())
+        import time as _time
+        started = _time.time()
+        try:
+            with urllib.request.urlopen(req, timeout=self.config.timeout) as fh:
+                data = json.loads(fh.read().decode("utf-8", "replace"))
+        finally:
+            # 真实请求的耗时记进状态里（界面左下角的气泡显示的就是它）
+            try:
+                from . import provider as _prv
+                _prv.STATUS.report(True, "", int((_time.time() - started) * 1000))
+                _prv.STATUS.set_model(self.config.model)
+            except Exception:
+                pass
+        return data
 
-    def _chat(self, system: str, user: str, json_mode: bool = False) -> str:
+    # ---- 三种协议的请求体与回复解析 ----
+    def _payload(self, system: str, user: str, json_mode: bool = False) -> dict:
+        proto = self.config.protocol
+        if proto == "anthropic_messages":
+            payload = {"model": self.config.model,
+                       "max_tokens": self.config.max_tokens,
+                       "messages": [{"role": "user", "content": user}]}
+            if system:
+                payload["system"] = system
+            if json_mode:
+                payload["messages"][0]["content"] += \
+                    "\n只输出 JSON，不要任何解释文字。"
+            return payload
+        if proto == "openai_responses":
+            payload = {"model": self.config.model,
+                       "input": user,
+                       "max_output_tokens": self.config.max_tokens}
+            if system:
+                payload["instructions"] = system
+            if json_mode:
+                payload["text"] = {"format": {"type": "json_object"}}
+            return payload
         payload = {
             "model": self.config.model,
             "temperature": self.config.temperature,
@@ -475,11 +560,35 @@ class HttpChatClient(LLMClient):
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
-        data = self._post(payload)
+        return payload
+
+    @staticmethod
+    def _extract(data: dict, protocol: str) -> str:
+        if protocol == "anthropic_messages":
+            try:
+                return "".join(str(part.get("text") or "")
+                               for part in (data.get("content") or []))
+            except (AttributeError, TypeError):
+                raise ValueError("回复格式异常：%s" % json.dumps(data, ensure_ascii=False)[:200])
+        if protocol == "openai_responses":
+            if isinstance(data.get("output_text"), str):
+                return data["output_text"]
+            chunks = []
+            for item in (data.get("output") or []):
+                for part in (item.get("content") or []):
+                    if isinstance(part, dict) and part.get("text"):
+                        chunks.append(str(part["text"]))
+            if chunks:
+                return "".join(chunks)
+            raise ValueError("回复格式异常：%s" % json.dumps(data, ensure_ascii=False)[:200])
         try:
             return data["choices"][0]["message"]["content"] or ""
         except (KeyError, IndexError, TypeError):
             raise ValueError("回复格式异常：%s" % json.dumps(data, ensure_ascii=False)[:200])
+
+    def _chat(self, system: str, user: str, json_mode: bool = False) -> str:
+        data = self._post(self._payload(system, user, json_mode))
+        return self._extract(data, self.config.protocol)
 
     def _chat_json(self, system: str, user: str) -> str:
         try:
