@@ -279,7 +279,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, "帮助",
             "NameCat %s —— 批量重命名\n\n"
-            "工作流：选择目录 → 扫描 → 加规则 → 生成预览 → 执行。\n"
+            "工作流：选择目录或文件 → 扫描 → 加规则 → 生成预览 → 执行。\n"
             "预览只算新名字，不落盘；执行会写撤销日志，可在「执行记录」撤回。\n\n"
             "快捷键：F5 重新扫描 · Ctrl+Enter 生成预览 · Ctrl+1…4 切页\n\n"
             "预设目录：%s\n撤销日志：%s\n要求文件：%s"

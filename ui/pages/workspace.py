@@ -493,11 +493,9 @@ class WorkspacePage(QWidget):
         self.path = PathInput(self.state.root)
         self.path.edited.connect(self._on_root_changed)
         row1.addWidget(self.path, 1)
-        browse = Button("选择目录")
-        browse.clicked.connect(self._browse)
-        row1.addWidget(browse)
-        pick = Button("扫描对象…")
-        pick.clicked.connect(self._pick_items)
+        pick = Button("选择…")
+        pick.setToolTip("选一个文件夹当扫描根目录，或选多个文件当「只要这几个」")
+        pick.clicked.connect(self._pick)
         row1.addWidget(pick)
         self.btn_scan = Button("开始扫描", "scan", "cta", icon_px=16)
         self.btn_scan.clicked.connect(lambda: self.scan())
@@ -650,7 +648,7 @@ class WorkspacePage(QWidget):
         dz = vbox(self.drop_panel, (16, 10, 16, 10), 0)
         dz.addWidget(EmptyState(
             "inbox", "拖入文件或文件夹开始",
-            "把文件/文件夹拖到这里，或点「选择目录」扫描对象。"
+            "把文件/文件夹拖到这里，或点工具栏的「选择…」。"
             "然后 F5 先扫描清单，再回来加规则。"), 1)
         lay.addWidget(self.drop_panel, 1)
         return card
@@ -1152,15 +1150,26 @@ class WorkspacePage(QWidget):
         self.state.include_hidden = bool(value)
         self._mark_stale()
 
-    def _browse(self):
+    def _pick(self):
+        """「选择…」一个按钮覆盖两种用法，和拖放走同一个入口。
+
+        · 选**一个文件夹**   → 当扫描根目录（扫里面全部）
+        · 选**多个文件/文件夹** → 当「只要这几个」（state.selected）
+
+        必须关掉原生对话框：Windows 原生文件对话框不允许文件和文件夹混选。
+        """
         start = self.state.root or os.path.expanduser("~")
-        path = QFileDialog.getExistingDirectory(self, "选择要处理的文件夹", start)
-        if not path:
+        dlg = QFileDialog(self, "选择要处理的文件夹或文件", start)
+        dlg.setOption(QFileDialog.DontUseNativeDialog, True)
+        # Directory | ExistingFiles：非原生对话框下允许「文件与文件夹混选 + 多选」。
+        # 注意 PySide6 的 FileMode 不支持 | 运算，必须按 .value 拼再转回枚举。
+        dlg.setFileMode(QFileDialog.FileMode(
+            QFileDialog.Directory.value | QFileDialog.ExistingFiles.value))
+        if dlg.exec() != QFileDialog.Accepted:
             return
-        self.path.setText(path)
-        self.state.selected = ()
-        self._on_root_changed()
-        self.scan()
+        paths = [p for p in dlg.selectedFiles() if p]
+        if paths:
+            self.add_paths(paths)
 
     def add_paths(self, paths):
         """拖进来 / 选进来的路径：单个文件夹当根目录扫里面，其余当「扫描对象」。"""
@@ -1182,12 +1191,6 @@ class WorkspacePage(QWidget):
             self.state.root = root
         self.scan()
 
-    def _pick_items(self):
-        start = self.state.root or os.path.expanduser("~")
-        files, _ = QFileDialog.getOpenFileNames(self, "选择要处理的对象", start)
-        if files:
-            self.add_paths(files)
-
     def _advanced(self):
         if AdvancedDialog(self.state, self).exec() == QDialog.Accepted:
             self._mark_stale()
@@ -1206,7 +1209,7 @@ class WorkspacePage(QWidget):
         self.state.root = self.path.text()
         if not self.state.root:
             QMessageBox.information(self, "还没有选择文件夹",
-                                    "先用「选择目录」选一个文件夹，或点「扫描对象…」。")
+                                    "点「选择…」选一个文件夹（当根目录）或若干文件（只要这几个）。")
             return False
         if not os.path.isdir(self.state.root):
             QMessageBox.warning(self, "目录不存在", self.state.root)
