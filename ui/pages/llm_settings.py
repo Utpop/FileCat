@@ -389,8 +389,12 @@ class LlmPage(QWidget):
         cfg.model = self.model.value()
         cfg.models_url = self.models_url.text().strip()
         cfg.headers = A.llm_save_headers(self.headers.toPlainText())
-        if self._key_input:
-            cfg.api_key = self._key_input
+        # 密钥以输入框为准、_key_input 兜「刚输入还没失焦」的那一瞬：
+        # 其它字段都是直接读控件的，密钥没道理例外（editingFinished 要等失焦，
+        # 粘贴完直接点「测试连接」的那一瞬读不到就白输了）。
+        key = self._key_input or self.key_edit.text().strip()
+        if key:
+            cfg.api_key = key
         return cfg
 
     def _mark_dirty(self):
@@ -406,6 +410,15 @@ class LlmPage(QWidget):
         else:
             self.dirty_label.setText("与磁盘一致")
             self.dirty_label.setStyleSheet("color:%s;background:transparent;" % C["t3"])
+
+    def _sync_dirty_after_write(self):
+        """「添加模型 / 获取模型列表」会顺手把当前表单一起写盘，脏标记要跟着回落。
+
+        这两个动作不带密钥（密钥只认「保存配置」），所以只要用户刚输入的密钥
+        还没落盘，就仍然算「有未保存的修改」，别骗人说已经存好了。
+        """
+        self._dirty = bool(self._key_input)
+        self._refresh_dirty()
 
     def _on_key_edited(self):
         self._key_input = self.key_edit.text().strip()
@@ -477,9 +490,18 @@ class LlmPage(QWidget):
 
     def _refresh_state(self):
         cfg = self._current_config()
-        key_state = "已填写" if cfg.api_key else "未填写"
-        if not cfg.api_key and A.llm_provider_key_saved():
+        # 密钥状态有三种来源，得分开说：
+        #   本次输入（还没存）/ 本机已保存（沿用）/ 环境变量兜底。
+        # 不能只看 cfg.api_key —— 它已经把三种情况混成"有没有值"了，
+        # 结果输入框明明是空的，明细里却写着「已填写」。
+        if self._key_input:
+            key_state = "已填写（未保存）"
+        elif A.llm_provider_key_saved():
             key_state = "已保存（沿用）"
+        elif cfg.api_key:
+            key_state = "来自环境变量"
+        else:
+            key_state = "未填写"
         tone = "ok" if cfg.api_key else "muted"
         self.state_badge.setText("已就绪" if cfg.base_url and cfg.api_key else "未就绪")
         self.state_badge.setStyleSheet(
@@ -566,6 +588,7 @@ class LlmPage(QWidget):
         self.notice.set_text("已保存 %d 个模型" % len(names), "success")
         self.notice.show()
         self.fetch_row.set_desc("已保存 %d 个模型" % len(names))
+        self._sync_dirty_after_write()
         self._refresh_state()
         self.status_message.emit("已保存 %d 个模型" % len(names))
 
@@ -594,21 +617,34 @@ class LlmPage(QWidget):
         self._set_model_options(cfg)
         self.notice.set_text("已添加模型「%s」" % name, "success")
         self.notice.show()
+        self._sync_dirty_after_write()
         self._refresh_state()
 
     def save(self):
         """把供应商配置写盘（密钥另行加密保存）。"""
         cfg = self._current_config()
-        key = self._key_input
+        # 「手动输入模型名」填了却没点「添加」就保存：那是用户想要的模型，
+        # 不能因为少点一次按钮就把它悄悄丢掉。
+        manual = self.manual_model.text().strip()
+        if manual:
+            names = list(cfg.models or [])
+            if manual not in names:
+                names.insert(0, manual)
+            cfg.models = names
+            cfg.model = manual
+        key = self._key_input or self.key_edit.text().strip()
         path = A.llm_save_provider_config(cfg, key if key else None)
         if not path:
             self.notice.set_text("保存失败：配置目录写不进去", "error")
             self.notice.show()
             return
+        self.manual_model.setText("")
         self._key_input = ""
         self.key_edit.setText("")
         self.key_edit.edit.setPlaceholderText(
             "已保存（留空即沿用）" if A.llm_provider_key_saved() else "粘贴你的密钥")
+        # 手填的模型名已经进列表了，下拉框跟上，别让「模型」还显示旧值
+        self._set_model_options(cfg)
         self._dirty = False
         self.notice.set_text("已保存供应商配置：%s" % path, "success")
         self.notice.show()
