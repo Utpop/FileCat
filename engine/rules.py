@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 
 from . import context
 from . import template as tpl
+from . import zhconv as _ZH
 
 # --------------------------------------------------------------------------- #
 # 规则类型表：kind -> 中文名 / 参数提示 / 说明
@@ -71,6 +72,8 @@ RULE_KINDS = [
      "可用 {n} {name} {ext} {date} {parent} 等，见 README"),
     ("slug", "规范化为 URL 安全名", {"a": "替换成什么（默认 _）", "b": "", "c": ""}, ""),
     ("translit", "音译（转拉丁字母）", {"a": "", "b": "", "c": ""}, ""),
+    ("zhconv", "简繁转换", {"a": "s2t（简转繁）/ t2s（繁转简）", "b": "", "c": ""},
+     "逐字转换，表外字符（数字、字母、符号…）原样保留"),
     ("hash", "追加文件校验值", {"a": "md5/sha1/sha256/crc32", "b": "取前 N 位（0=全取）",
                                 "c": "位置 prefix/suffix"}, ""),
     ("filename_clean", "Windows 文件名清理", {"a": "", "b": "非法字符替换成（默认 _）", "c": ""},
@@ -115,6 +118,8 @@ CLI_ALIASES = {
     "trim": "trim", "insert": "insert", "delete": "delete",
     "number": "number", "serialize": "number", "seq": "number",   # serialize 已并入 number
     "slug": "slug", "translit": "translit", "hash": "hash",
+    "zh": "zhconv", "zhconv": "zhconv", "s2t": "zhconv", "t2s": "zhconv",
+    "简繁": "zhconv",
     "clean": "filename_clean", "filename-clean": "filename_clean",
     "move": "move", "pad": "pad_numbers", "pad-numbers": "pad_numbers",
     "collapse": "collapse", "randomize": "randomize", "random": "randomize",
@@ -183,6 +188,12 @@ class Rule:
         else:
             head = name
             params = [str(p) for p in (self.a, self.b, self.c) if p != "" and p is not None]
+        if self.kind == "zhconv":
+            # 参数是 s2t/t2s 这种代号，直接摆出来没人看得懂，换成方向文案
+            mode = (self.a or "s2t").strip().lower()
+            head = "%s（%s）" % (
+                name, "简→繁" if mode != "t2s" else "繁→简")
+            params = []
         body = "  ".join("「%s」" % p for p in params)
         return (head + (" " + body if body else "") + scope).strip()
 
@@ -561,6 +572,11 @@ def transform(rule: Rule, text: str, num: int = 1, width: int = 1,
         return slugify(text, a)
     if kind == "translit":
         return translit(text)
+    if kind == "zhconv":
+        mode = (a or "s2t").strip().lower()
+        if mode not in ("s2t", "t2s"):
+            mode = "s2t"
+        return _ZH.convert(text, mode)
     if kind == "hash":
         path = getattr(ctx, "path", "") if ctx is not None else ""
         if not path:
@@ -811,6 +827,9 @@ def parse_cli_rule(spec: str) -> Rule:
     if kind not in RULE_KIND_TEXT:
         raise ValueError("未知规则：%s（可用：%s）" % (
             name, "、".join(sorted(k for k in CLI_ALIASES))))
+    if kind == "zhconv" and not a and name.lower() in ("s2t", "t2s"):
+        # `t2s` 这种「别名即方向」的写法：规则名本身就是参数，别丢掉
+        a = name.lower()
     rule = make_rule(kind, a, b, c)
     if sel_part:
         opts = {}

@@ -33,10 +33,13 @@ from engine import plan as P              # noqa: E402
 from engine import presets as PS          # noqa: E402
 from engine import rules as R             # noqa: E402
 from engine import template as T          # noqa: E402
+from engine.cli import install_safe_output   # noqa: E402  控制台装不下的符号先降级
 from engine.context import Item, NameContext   # noqa: E402
 from engine.scan import (KIND_DIR, KIND_FILE, KIND_IMAGE, KIND_VIDEO,  # noqa: E402
                          SORT_KEYS, ScanOptions, check_file_magic, kind_of,
                          natural_key, scan)
+
+install_safe_output()   # GBK 终端下 ✓/✗ 装不下，先降级
 
 PASS = 0
 FAIL = 0
@@ -111,7 +114,7 @@ CHAIN_RULES = {
 
 def test_rules_unit():
     case("A1 规则类型表完整")
-    eq(len(R.RULE_KINDS), 27, "27 种规则（编号 / 序列化 / 模板…）")
+    eq(len(R.RULE_KINDS), 28, "28 种规则（编号 / 序列化 / 模板…）")
     ok(len(set(R.RULE_KIND_IDS)) == len(R.RULE_KIND_IDS), "类型名无重复")
     ok(all(k in R.RULE_KIND_IDS for k in
            ("insert", "delete", "replace", "regex", "case", "template", "number")),
@@ -164,6 +167,11 @@ def test_rules_unit():
     case("A10 音译与 slug")
     eq(R.transform(R.make_rule("translit"), "Привет"), "Privet")
     eq(R.transform(R.make_rule("slug"), "Hello World 2024.txt"), "hello_world_2024_txt")
+    case("A10b 简繁转换")
+    eq(R.transform(R.make_rule("zhconv", "s2t"), "风景_写真集.txt"), "風景_寫真集.txt")
+    eq(R.transform(R.make_rule("zhconv", "t2s"), "風景_寫真集.txt"), "风景_写真集.txt")
+    eq(R.transform(R.make_rule("zhconv"), "ABC123_name.txt"), "ABC123_name.txt")
+    eq(R.transform(R.make_rule("zhconv", "bogus"), "简体"), "簡體")
 
     case("A11 移动字符与数字补零")
     eq(R.transform(R.make_rule("move", "5", "3", "1"), "abcdefgh"), "efgabcdh")

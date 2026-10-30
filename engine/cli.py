@@ -39,6 +39,90 @@ ONLY_CHOICES = {
 }
 
 
+# ---- 控制台输出：先降级再写，宁可变丑也不要崩 ----
+#
+# Windows 中文终端默认 cp936 / GBK，装不下 U+2713（✓）、U+2192（→）这类
+# 装饰符号，而 plan.describe_plan 正是用它们当状态标记 —— 直接 print 会以
+# UnicodeEncodeError 崩掉整个命令，且崩溃点离真正的原因很远（报错里只会看到
+# 某个 py 行的 \u2713，看不出是"终端装不下"）。中文汉字 GBK 都表示得了，
+# 所以正文不受影响，只有这些符号需要替身。
+_SYM_FALLBACK = (
+    ("✓", "OK"), ("✗", "X"), ("✔", "OK"), ("✘", "X"),
+    ("×", "x"), ("→", "->"), ("←", "<-"), ("…", "..."),
+    ("—", "--"), ("–", "-"), ("─", "-"), ("·", "."),
+    ("【", "["), ("】", "]"), ("、", ","),
+)
+
+# ASCII 兜底顺序：这些是可降级符号集之外的备用（箭头等在上面已覆盖）
+_ENC_CACHE: dict = {}
+
+
+def _console_encoding() -> str:
+    stream = sys.__stdout__ or sys.__stderr__
+    return getattr(stream, "encoding", None) or "utf-8"
+
+
+def _fit_text(text: str) -> str:
+    """把一段待输出文本降级到控制台能表示的形态。"""
+    enc = _ENC_CACHE.get("enc") or _console_encoding()
+    try:
+        text.encode(enc)
+        return text
+    except (UnicodeEncodeError, LookupError):
+        pass
+    for src, dst in _SYM_FALLBACK:
+        if src in text:
+            text = text.replace(src, dst)
+    try:
+        text.encode(enc)
+        return text
+    except (UnicodeEncodeError, LookupError):
+        # 还有装不下的（罕见：希腊字母、扩展汉字等）：按字符替换成 ?
+        return text.encode(enc, "replace").decode(enc, "replace")
+
+
+class _SafeStream:
+    """包在 stdout / stderr 外面的一层壳，其余属性原样透传。"""
+
+    def __init__(self, base):
+        self._base = base
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
+
+    def write(self, text):
+        if isinstance(text, bytes):
+            return self._base.write(text)
+        return self._base.write(_fit_text(str(text)))
+
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+
+    def flush(self):
+        return self._base.flush()
+
+
+def install_safe_output() -> None:
+    """命令行启动时调一次：装好降级输出。重复调用安全。"""
+    _ENC_CACHE["enc"] = _console_encoding()
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if isinstance(stream, _SafeStream):
+            continue
+        if stream is None:
+            # 窗口化子系统从无控制台的方式启动（双击 GUI exe 却带了命令行参数）：
+            # 这时 print 会是 AttributeError，宁可悄悄丢掉也不崩。
+            import io
+            setattr(sys, name, io.StringIO())
+            continue
+        try:
+            stream.reconfigure(errors="replace")   # 兜底：别处绕过壳也不崩
+        except Exception:
+            pass
+        setattr(sys, name, _SafeStream(stream))
+
+
 def _progress(quiet: bool):
     """统一的进度回调。扫描阶段只传一个目录名，执行阶段传三参数。"""
     if quiet:
@@ -310,6 +394,7 @@ def cmd_presets(_args) -> int:
 
 
 def main(argv=None) -> int:
+    install_safe_output()   # GBK 终端上遇到装不下的符号先降级，别炸在这儿
     parser = build_parser()
     args = parser.parse_args(argv)
     if not args.cmd:

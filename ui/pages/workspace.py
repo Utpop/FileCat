@@ -8,25 +8,32 @@ ui.pages.workspace —— 重命名工作台（新版界面）
 
 from __future__ import annotations
 
+import math
 import os
 from typing import List, Optional
 
-from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QFontMetrics
-from PySide6.QtWidgets import (QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
-                               QLabel, QLineEdit, QMenu, QMessageBox, QPushButton,
-                               QSizePolicy, QVBoxLayout, QWidget)
+from PySide6.QtCore import (QAbstractAnimation, QSize, Qt, QTimer, QVariantAnimation,
+                            Signal)
+from PySide6.QtGui import QColor, QFontMetrics, QTransform
+from PySide6.QtWidgets import (QDialog, QFileDialog, QFrame, QGraphicsOpacityEffect,
+                               QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu,
+                               QMessageBox, QPushButton, QSizePolicy, QVBoxLayout,
+                               QWidget)
 
 from adapters import engine_adapter as A
 from engine import rules as R
 from ui.base import (C, F, R_XS, Badge, Button, Card, Check, Clickable, Chip,
-                     Elided, EmptyState, Label, NoticeBar, PageHead, Select, Strip,
+                     Elided, EmptyState, Label, PageHead, Select, Strip,
                      fit_scroll_content, grid_row, hbox, hline, icon, scroll_area,
                      spacer, svg_pixmap, vbox)
 from workers import task_workers as W
 
 STATUS_TONE = {"ok": C["info"], "same": C["t2"], "conflict": C["warn"],
                "error": C["err"], "skip": C["t2"]}
+
+# 扫描栏右侧状态文案的三种颜色：灰 = 默认/淡出后，蓝 = 扫描中，深灰 = 刚扫完
+SCAN_GRAY = C["t3"]        # 色板里的 #999 档灰
+SCAN_DARK = C["t2"]        # 深灰文字（扫完 5 秒内）
 
 
 class Item(QLabel):
@@ -241,7 +248,7 @@ class RulePicker(QDialog):
         body.setStyleSheet("background:%s;" % C["white"])
         self.list_lay = vbox(body, 0, 4)
         self.list_lay.addStretch(1)
-        # 规则一多（现在 27 种）就装不进固定高度的弹窗，必须内滚：
+        # 规则一多（现在 28 种）就装不进固定高度的弹窗，必须内滚：
         # 否则 Qt 会把每个分组压扁，行与行互相重叠
         self._scroll = scroll_area(body)
         root.addWidget(self._scroll, 1)
@@ -461,9 +468,6 @@ class WorkspacePage(QWidget):
         outer = vbox(self, (20, 18, 20, 12), 12)
         self.head_widget = self._head()
         outer.addWidget(self.head_widget)
-        self.notice = NoticeBar("")
-        self.notice.hide()
-        outer.addWidget(self.notice)
         self.toolbar_card = self._toolbar()
         outer.addWidget(self.toolbar_card)
         self.rules_wrap = self._rules()
@@ -473,6 +477,10 @@ class WorkspacePage(QWidget):
         outer.addWidget(self._summary())
         self._focus = False
         self._refresh_all()
+        self._scan_status_idle()
+        # 启动引导：原来的「现在可以添加规则了」横幅退场，改成按钮自己亮一次
+        if not self.rules:
+            QTimer.singleShot(900, self._pulse_add_rule)
 
     # ---------------- 页头 ----------------
     def _head(self):
@@ -522,8 +530,23 @@ class WorkspacePage(QWidget):
         row2.addWidget(adv_holder, 0)
 
         row2.addWidget(spacer(), 1)
-        self.count_label = Label("", 11, 400, C["t2"])
-        row2.addWidget(self.count_label, 0, Qt.AlignVCenter)
+        # 扫描状态并入扫描栏（唯一显示处，底部统计条另有汇总）：
+        # 未扫描 = 灰字「已扫描 0 项」→ 扫描中 = 蓝字 + 转动图标 →
+        # 扫完 = 绿勾 + 深灰字，5 秒后淡回灰色默认态。
+        # 状态一变就套同色系的胶囊浅底（ok_bg / info_bg / err_bg…），
+        # 让「这里有新消息」一眼可见；灰色默认态无底色。
+        self.scan_status = QWidget()
+        self.scan_status.setObjectName("ScanStatus")
+        self.scan_status.setAttribute(Qt.WA_StyledBackground, True)
+        self.scan_status.setFixedHeight(22)
+        sst = hbox(self.scan_status, (10, 0, 10, 0), 5)
+        self.scan_icon = QLabel()
+        self.scan_icon.setFixedSize(13, 13)
+        self.scan_icon.hide()
+        sst.addWidget(self.scan_icon, 0, Qt.AlignVCenter)
+        self.count_label = Label("已扫描 0 项", 11, 400, SCAN_GRAY)
+        sst.addWidget(self.count_label, 0, Qt.AlignVCenter)
+        row2.addWidget(self.scan_status, 0, Qt.AlignVCenter)
         lay.addLayout(row2)
         return card
 
@@ -559,6 +582,7 @@ class WorkspacePage(QWidget):
         head.addWidget(spacer(), 1)
         add = Button("添加规则", "plus", "sm_brand", icon_px=12)
         add.clicked.connect(lambda: self.add_rule())
+        self.btn_add_rule = add          # 启动引导的 pulse 动画要用
         head.addWidget(add)
         rc.addLayout(head)
         rc.addSpacing(8)
@@ -754,19 +778,23 @@ class WorkspacePage(QWidget):
         self.btn_expand.setIcon(icon("shrink" if self._focus else "expand", C["t1"], 14))
         self.btn_expand.setToolTip("还原布局" if self._focus else "放大预览（占满整页）")
         if self._focus:
-            self.notice.hide()
             self.status_message.emit("已放大预览；点右上角箭头或按 Esc 还原")
 
     def _notice_msg(self, text, tone="info"):
-        """提示条统一入口：专注模式下警告/错误先还原布局，其余不打断。"""
+        """页面内消息统一入口：全部并入扫描栏右侧的状态槽（横幅已整体退场）。
+
+        专注模式下警告/错误先还原布局（工具栏回来了状态槽才可见），其余不打断、
+        只走底部状态栏。
+        """
+        flat = " · ".join(line.strip() for line in str(text or "").splitlines()
+                          if line.strip())
         if getattr(self, "_focus", False):
             if tone in ("warn", "error"):
                 self._toggle_focus()
             else:
-                self.status_message.emit(str(text).replace("\n", " · "))
+                self.status_message.emit(flat)
                 return
-        self.notice.set_text(text, tone)
-        self.notice.show()
+        self._scan_status_message(flat, tone)
 
     def keyPressEvent(self, event):  # noqa: N802
         if event.key() == Qt.Key_Escape and getattr(self, "_focus", False):
@@ -1039,7 +1067,206 @@ class WorkspacePage(QWidget):
             self.preview_hint.setText(
                 ("%d 项 · 已勾选 %d 项" % (n, checked)) if self.bundle.has_plan
                 else ("%d 项 · 尚未生成预览" % n))
-            self.count_label.setText("已扫描 %d 项" % n)
+
+    # ---- 扫描栏右侧的状态机（颜色见 SCAN_GRAY / SCAN_DARK） ----
+    def _scan_status_bg(self, color):
+        """状态槽的胶囊底色；「transparent」= 灰色默认态无胶囊。"""
+        self.scan_status.setStyleSheet(
+            "#ScanStatus{background:%s;border-radius:11px;}" % color)
+
+    def _scan_status_text(self, text):
+        """状态槽的单行文本：超过 420px 用省略号截断，全文进 tooltip。
+
+        手动定宽而不是用 Elided——省略后的 sizeHint 会反过来把布局挤窄，
+        宽度越算越小（反馈塌缩），这里宽度只由全文算一次，稳定。
+        """
+        fm = QFontMetrics(self.count_label.font())
+        full = str(text or "")
+        if fm.horizontalAdvance(full) > 420:
+            self.count_label.setText(fm.elidedText(full, Qt.ElideRight, 420))
+            self.count_label.setToolTip(full)
+        else:
+            self.count_label.setText(full)
+            self.count_label.setToolTip("")
+        self.count_label.setFixedWidth(min(fm.horizontalAdvance(full) + 2, 422))
+
+    def _scan_status_idle(self):
+        """灰色默认态：未扫描时是「已扫描 0 项」，扫完淡出后回到这里（数字保留）。"""
+        self._scan_spin_stop()
+        self._scan_fade_stop()
+        self.scan_icon.hide()
+        n = len(self.bundle.items()) if (
+            self.bundle is not None and self.bundle.has_scan) else 0
+        self._scan_status_text("已扫描 %d 项" % n)
+        self.count_label.setStyleSheet(
+            "color:%s;background:transparent;" % SCAN_GRAY)
+        self._scan_status_bg("transparent")
+
+    def _scan_status_busy(self):
+        """扫描中：蓝字「正在扫描…」+ 转动的刷新图标，蓝胶囊底。"""
+        self._scan_fade_stop()
+        self._spin_base = svg_pixmap("refresh", C["info"], 13)
+        self.scan_icon.setPixmap(self._spin_base)
+        self.scan_icon.setGraphicsEffect(None)
+        self.scan_icon.show()
+        self._scan_status_text("正在扫描…")
+        self.count_label.setStyleSheet(
+            "color:%s;background:transparent;" % C["info"])
+        self._scan_status_bg(C["info_bg"])
+        self._scan_spin_start()
+
+    def _scan_status_done(self):
+        """扫完：绿勾 + 深灰字 + 绿胶囊底，挂一个 5 秒后淡回灰色的定时器。"""
+        self._scan_spin_stop()
+        self.scan_icon.setPixmap(svg_pixmap("check", C["ok"], 13))
+        self.scan_icon.setGraphicsEffect(None)
+        self.scan_icon.show()
+        n = len(self.bundle.items()) if self.bundle is not None else 0
+        self._scan_status_text("已扫描 %d 项" % n)
+        self.count_label.setStyleSheet(
+            "color:%s;background:transparent;" % SCAN_DARK)
+        self._scan_status_bg(C["ok_bg"])
+        self._scan_fade_schedule()
+
+    def _scan_status_message(self, text, tone):
+        """警告 / 错误 / 结果类消息：同样走扫描栏右侧，语气色文字 + 同色胶囊底。
+
+        与扫描三态互斥：新消息顶掉旧状态，下一次扫描/淡出再恢复正常三态。
+        消息不自动淡出——错误和结果需要停留到用户下一个动作。
+        """
+        self._scan_spin_stop()
+        self._scan_fade_stop()
+        ic, fg, bg = {
+            "success": ("check", C["ok"], C["ok_bg"]),
+            "warn": ("info", C["warn"], C["warn_bg"]),
+            "error": ("x", C["err"], C["err_bg"]),
+            "info": ("info", C["info"], C["info_bg"]),
+        }.get(tone, ("info", C["info"], C["info_bg"]))
+        self.scan_icon.setPixmap(svg_pixmap(ic, fg, 13))
+        self.scan_icon.setGraphicsEffect(None)
+        self.scan_icon.show()
+        self._scan_status_text(text)
+        self.count_label.setStyleSheet(
+            "color:%s;background:transparent;" % fg)
+        self._scan_status_bg(bg)
+
+    def _scan_spin_start(self):
+        if getattr(self, "_spin_timer", None) is not None:
+            return
+        self._spin_angle = 0
+        timer = QTimer(self)
+        timer.setInterval(40)
+        timer.timeout.connect(self._scan_spin_tick)
+        self._spin_timer = timer
+        timer.start()
+
+    def _scan_spin_tick(self):
+        self._spin_angle = (self._spin_angle + 30) % 360
+        self.scan_icon.setPixmap(self._spin_base.transformed(
+            QTransform().rotate(self._spin_angle), Qt.SmoothTransformation))
+
+    def _scan_spin_stop(self):
+        timer = getattr(self, "_spin_timer", None)
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+            self._spin_timer = None
+
+    def _scan_fade_schedule(self):
+        self._scan_fade_stop()
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(self._scan_fade_start)
+        self._fade_timer = timer
+        timer.start(5000)
+
+    def _scan_fade_start(self):
+        self._fade_timer = None
+        icon_eff = QGraphicsOpacityEffect(self.scan_icon)
+        self.scan_icon.setGraphicsEffect(icon_eff)
+        anim = QVariantAnimation(self)
+        anim.setDuration(450)
+        anim.setStartValue(1.0)
+        anim.setEndValue(0.0)
+        dark, gray = QColor(SCAN_DARK), QColor(SCAN_GRAY)
+        bg = QColor(C["ok_bg"])
+
+        def mix(c1, c2, t):
+            return QColor(int(c1.red() + (c2.red() - c1.red()) * t),
+                          int(c1.green() + (c2.green() - c1.green()) * t),
+                          int(c1.blue() + (c2.blue() - c1.blue()) * t)).name()
+
+        def step(v):
+            t = float(v)
+            icon_eff.setOpacity(t)
+            self.count_label.setStyleSheet(
+                "color:%s;background:transparent;" % mix(dark, gray, t))
+            # 胶囊底色同步淡出（QSS 用 rgba 表达透明度）
+            self.scan_status.setStyleSheet(
+                "#ScanStatus{background:rgba(%d,%d,%d,%.2f);border-radius:11px;}"
+                % (bg.red(), bg.green(), bg.blue(), t))
+
+        def done():
+            if getattr(self, "_fade_anim", None) is not anim:
+                return          # 中途被新扫描打断（_scan_fade_stop 已置空），别覆盖新状态
+            self._fade_anim = None
+            self._scan_status_idle()
+
+        anim.valueChanged.connect(step)
+        anim.finished.connect(done)
+        self._fade_anim = anim
+        anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+
+    def _scan_fade_stop(self):
+        timer = getattr(self, "_fade_timer", None)
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+            self._fade_timer = None
+        anim = getattr(self, "_fade_anim", None)
+        if anim is not None:
+            self._fade_anim = None   # 先摘引用，finished 里就不会回写灰色默认态
+            anim.stop()
+
+    def _pulse_add_rule(self):
+        """「添加规则」按钮 pulse 一次（约 1.5s）：底色与描边向品牌蓝鼓一下再收回。
+
+        取代旧的引导横幅——语义还在（可以添加规则了），但不占一整行布局。
+        已经有规则、按钮不可见或动画正在进行时直接跳过。
+        """
+        btn = getattr(self, "btn_add_rule", None)
+        if btn is None or self.rules or not btn.isVisible():
+            return
+        if getattr(self, "_pulse_anim", None) is not None:
+            return
+        white, soft = QColor("#FFFFFF"), QColor(C["brand_soft"])
+        off, brand = QColor(C["brand_off"]), QColor(C["brand"])
+
+        def mix(c1, c2, t):
+            return QColor(int(c1.red() + (c2.red() - c1.red()) * t),
+                          int(c1.green() + (c2.green() - c1.green()) * t),
+                          int(c1.blue() + (c2.blue() - c1.blue()) * t)).name()
+
+        anim = QVariantAnimation(btn)
+        anim.setDuration(1500)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+
+        def step(v):
+            k = math.sin(math.pi * float(v))     # 0 → 1 → 0，单次鼓起
+            btn.setStyleSheet(
+                "QPushButton#BtnSmBrand{background:%s;border-color:%s;}"
+                % (mix(white, soft, k), mix(off, brand, k)))
+
+        anim.valueChanged.connect(step)
+
+        def done():
+            btn.setStyleSheet("")                # 回到全局 QSS 的常态
+            self._pulse_anim = None
+
+        anim.finished.connect(done)
+        self._pulse_anim = anim
+        anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
 
     def _row_widgets(self):
         out = []
@@ -1233,6 +1460,7 @@ class WorkspacePage(QWidget):
             return
         self._plan_after_scan = bool(plan_after and self.rules)
         self._busy_set(True, "正在扫描…")
+        self._scan_status_busy()
         task = W.scan_task(self.state)
         task.signals.done.connect(self._scan_done)
         task.signals.failed.connect(self._failed)
@@ -1245,9 +1473,11 @@ class WorkspacePage(QWidget):
         self._refresh_preview()
         self._refresh_summary()
         n = len(bundle.items())
-        self._notice_msg("已扫出 %d 项%s" % (
-            n, "，点「生成预览」按规则链算名字" if self.rules else "，现在可以添加规则了"))
+        # 「已扫出 N 项」不占独立提示：结果就在扫描栏右侧的状态里（绿勾 5 秒后淡出）
+        self._scan_status_done()
         self.status_message.emit("已扫描 %d 项" % n)
+        if not self.rules:
+            self._pulse_add_rule()
 
     def _task_finished(self):
         self._busy_set(False)
@@ -1281,11 +1511,14 @@ class WorkspacePage(QWidget):
         if warns:
             self._notice_msg("生成预览时有提示：" + "；".join(warns[:3]), "warn")
         else:
-            self.notice.hide()
+            # 无警告：状态槽回到扫描栏的灰色默认态，别让上一次的错误挂着不走
+            self._scan_status_idle()
         self.status_message.emit("预览已更新：%s" % bundle.plan.summary())
 
     def _failed(self, message):
         self._busy_set(False)
+        if self.bundle is None or not self.bundle.has_scan:
+            self._scan_status_idle()   # 没扫成：状态回灰色默认，别停在「正在扫描…」
         self._notice_msg("操作失败：%s" % message, "error")
         self.status_message.emit("操作失败：%s" % message)
 
@@ -1369,9 +1602,8 @@ class WorkspacePage(QWidget):
     def _apply_done(self, result):
         ok = bool(getattr(result, "ok", False))
         msg = str(getattr(result, "message", "") or "")
-        log_path = str(getattr(result, "log_path", "") or "")
-        self._notice_msg(msg + ("\n撤销日志：%s" % log_path if log_path else ""),
-                         "success" if ok else "error")
+        # 撤销日志路径不再进状态槽（执行记录页有完整列表），只报结果本身
+        self._notice_msg(msg, "success" if ok else "error")
         self.status_message.emit(msg)
         self.stale = True
         self._refresh_preview()
