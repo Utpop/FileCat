@@ -133,6 +133,8 @@ RESERVED_NAMES = {"con", "prn", "aux", "nul",
                   *(f"com{i}" for i in range(1, 10)),
                   *(f"lpt{i}" for i in range(1, 10))}
 MAX_NAME_LEN = 255
+# 补零宽度上限见 template.MAX_WIDTH；随机串长度的上限放这里（只有 randomize 用）
+MAX_RANDOM = 64
 
 # 编号范围的短说法（describe 用；完整说法在 plan.SCOPE_TEXT）
 _SCOPE_SHORT = {"folder": "每文件夹重新编号", "kind": "每类型重新编号",
@@ -160,7 +162,10 @@ class Rule:
 
     # ---- 展示 ----
     def describe(self) -> str:
+        unknown = str((self.extras or {}).get("unknown_kind") or "")
         name = RULE_KIND_TEXT.get(self.kind, self.kind)
+        if unknown:
+            return "未知规则（%s）已按文本替换处理" % unknown
         scope = ""
         if self.selector and self.selector != "text":
             scope = "（作用于%s%s）" % (
@@ -234,18 +239,25 @@ def new_id(seed: str = "") -> str:
 
 def normalize(rule: Rule) -> Rule:
     """补齐缺省字段、把别名映射成规范 kind。原地修改并返回。"""
-    kind = (rule.kind or "replace").strip()
+    kind = str(rule.kind or "replace").strip()
     kind = CLI_ALIASES.get(kind.lower(), CLI_ALIASES.get(kind, kind))
     for prefix, mode in (("case_lower", "lower"), ("case_upper", "upper"),
                          ("case_title", "title"), ("case_sentence", "sentence")):
         if kind == prefix:
             kind, rule.a = "case", mode
+    # extras 必须是字典：手工构造出 `Rule(extras=None)` 时后面每一处 `ex[...]`
+    # 都会炸 AttributeError（JSON 入口已清洗过，这里兜程序化构造）。
+    if not isinstance(rule.extras, dict):
+        rule.extras = {}
     if kind not in RULE_KIND_TEXT:
+        # 认不出来的 kind（手改过的预设/旧版本规则）：按"文本替换"兜底以免报错，
+        # 但把原名留个记号 —— 界面会明确标出来，而不是静默变成一条空规则。
+        rule.extras["unknown_kind"] = kind
         kind = "replace"
     rule.kind = kind
     if not rule.id:
         rule.id = new_id(kind + str(rule.a) + str(rule.b) + str(rule.c))
-    rule.selector = (rule.selector or "text").strip().lower()
+    rule.selector = str(rule.selector if rule.selector is not None else "text").strip().lower()
     if rule.selector not in tpl.SELECTOR_KINDS:
         rule.selector = "text"
     rule.a = "" if rule.a is None else str(rule.a)
@@ -299,7 +311,7 @@ def number_options(rule) -> dict:
     b = str(getattr(rule, "b", "") or "").strip()
     if b:
         try:
-            out["width"] = max(0, int(b))
+            out["width"] = max(0, min(int(b), tpl.MAX_WIDTH))
         except ValueError:
             pass
     scope = str(ex.get("scope") or "").strip()
@@ -386,6 +398,7 @@ def pad_numbers(text: str, width, fill="0") -> str:
         w = int(width)
     except (TypeError, ValueError):
         return text
+    w = max(0, min(w, tpl.MAX_WIDTH))
     if w <= 0:
         return text
     fill = (fill or "0")[:1]
@@ -476,7 +489,7 @@ def _digits(rule, num, width) -> str:
         w = int(b) if b else (width or 0)
     except (TypeError, ValueError):
         w = width or 0
-    return tpl._num_text(k, max(0, w))
+    return tpl._num_text(k, max(0, min(w, tpl.MAX_WIDTH)))
 
 
 def transform(rule: Rule, text: str, num: int = 1, width: int = 1,
@@ -599,7 +612,7 @@ def transform(rule: Rule, text: str, num: int = 1, width: int = 1,
         return pad_numbers(text, a, b)
     if kind == "randomize":
         try:
-            n = max(0, int(a or 8))
+            n = max(0, min(int(a or 8), MAX_RANDOM))
         except (TypeError, ValueError):
             n = 8
         alpha = b or "0123456789abcdefghijklmnopqrstuvwxyz"

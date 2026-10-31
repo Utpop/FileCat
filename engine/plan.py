@@ -163,13 +163,20 @@ def compute_names(items: Sequence, rules: Sequence = (),
     items = list(items)
     chain = [R.normalize(r) for r in (rules or [])]
     opts = with_number_rule(opts, chain)
+
+    notes: List[str] = []
+    if not opts.step:
+        # 步长 0 没有意义：不回落就会让整批拿到同一个号码（全员"同名冲突"，
+        # 用户只看到一堆冲突，猜不到是步长写成了 0）。这里统一按 1 处理并说明。
+        opts = replace(opts, step=1)
+        notes.append("步长 0 已按 1 处理")
+
     assign_numbers(items, opts)
 
     ctxs = [NameContext(it.path, it.name, it.is_dir, it.index, it.total,
                         it.num, it.width, st=getattr(it, "st", None))
             for it in items]
 
-    notes: List[str] = []
     if chain and any(r.kind == "llm" for r in chain):
         notes = _resolve_llm(items, ctxs, chain, opts, client, notes)
 
@@ -269,6 +276,10 @@ def finalize(plan: Plan, opts: Optional[PlanOptions] = None) -> Plan:
 
     子项的目标路径要跟着父文件夹的新名字走：先把每个文件夹的
     「旧相对路径 → 新相对路径」算出来，再把所有条目按最长前缀替换。
+
+    跨盘符的批次（例如从 C: 和 D: 各拖一个文件夹进来）也归这里管：
+    不同盘符之间不存在父子关系，`relpath` 会直接抛 ValueError，
+    所以这类条目统一"不做前缀映射"，而不是让整批预览崩掉。
     """
     opts = opts or PlanOptions()
     items = plan.items
@@ -279,7 +290,9 @@ def finalize(plan: Plan, opts: Optional[PlanOptions] = None) -> Plan:
     for it in items:
         if not it.is_dir:
             continue
-        old_rel = os.path.relpath(it.path, root)
+        old_rel = _rel_to(it.path, root)
+        if not old_rel:                 # 跨盘：没有可用的相对路径，跳过映射
+            continue
         if it.new_name and it.new_name != it.name:
             new_rel = os.path.join(os.path.dirname(old_rel), it.new_name)
         else:
@@ -298,7 +311,10 @@ def finalize(plan: Plan, opts: Optional[PlanOptions] = None) -> Plan:
             got = cache.get(abs_dir)
             if got is not None:
                 return got
-            rel = os.path.relpath(abs_dir, root)
+            rel = _rel_to(abs_dir, root)
+            if not rel:                 # 跨盘：原样返回，不做映射
+                cache[abs_dir] = (abs_dir, False)
+                return abs_dir, False
             cur, low = rel, os.path.normcase(rel)
             changed = False
             for old_rel, old_low, new_rel_val in dir_map:
@@ -333,6 +349,20 @@ def finalize(plan: Plan, opts: Optional[PlanOptions] = None) -> Plan:
 
     plan.report = validate_items(items, dir_keys)
     return plan
+
+
+def _rel_to(path: str, root: str) -> str:
+    """`path` 相对 `root` 的路径；跨盘符时返回空串。
+
+    Windows 上 `os.path.relpath("D:\\x", "C:\\y")` 直接抛 ValueError
+    （"path is on mount 'D:', start on mount 'C:'"）。跨盘的对象之间本来就
+    不存在父子关系，所以调用方拿到空串就跳过"跟着父目录改名"的映射即可，
+    而不是让整批预览崩掉。
+    """
+    try:
+        return os.path.relpath(path, root)
+    except ValueError:
+        return ""
 
 
 def _common_root(items: Sequence) -> str:

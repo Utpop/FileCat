@@ -592,8 +592,27 @@ def test_llm():
     from engine import llm as L
 
     case("L1 默认要求与可编辑要求文件")
-    eq(L.read_instruction(), L.DEFAULT_INSTRUCTION, "文件不存在时回落默认要求")
+    # 默认要求文件：必须指到沙箱去，否则用户改过 %APPDATA% 里的要求文件后，
+    # 这条断言会永远红（测的是用户的配置，不是代码）。
     box = fresh("l1")
+    _old_env = os.environ.get(L.INSTRUCTION_ENV)
+    os.environ[L.INSTRUCTION_ENV] = os.path.join(box, "llm_instruction.txt")
+    try:
+        eq(L.read_instruction(), L.DEFAULT_INSTRUCTION, "文件不存在时回落默认要求")
+        eq(L.instruction_path(), os.path.abspath(os.environ[L.INSTRUCTION_ENV]),
+           "环境变量能改默认位置")
+        ok(L.instruction_path().endswith("llm_instruction.txt"), "默认文件名不变")
+        # 沙箱里建一份自定义要求后，默认读取要跟着变
+        L.write_instruction("沙箱里的要求")
+        eq(L.read_instruction(), "沙箱里的要求", "默认位置的自定义要求生效")
+        os.remove(os.environ[L.INSTRUCTION_ENV])
+        eq(L.read_instruction(), L.DEFAULT_INSTRUCTION, "删掉后回落默认要求")
+    finally:
+        if _old_env is None:
+            os.environ.pop(L.INSTRUCTION_ENV, None)
+        else:
+            os.environ[L.INSTRUCTION_ENV] = _old_env
+
     custom = os.path.join(box, "my_req.txt")
     L.write_instruction("只保留中文标题里的地名", custom)
     eq(L.read_instruction(custom), "只保留中文标题里的地名", "能读回自定义要求")
@@ -602,7 +621,6 @@ def test_llm():
     L.write_instruction("# 全是注释\n\n# 又是注释\n", custom)
     eq(L.read_instruction(custom), L.DEFAULT_INSTRUCTION, "只有注释时回落默认")
     eq(L.instruction_path(custom), os.path.abspath(custom), "显式路径优先")
-    ok(L.instruction_path().endswith("llm_instruction.txt"), "默认落在 APPDATA")
 
     case("L2 要求原文逐字进提示词")
     prompt = L.build_prompt(["a.jpg", "b.jpg"], "把日期删掉，只留主题", "zh", 16, "kebab")
@@ -1433,8 +1451,8 @@ def test_provider():
         cfg.model = "m"
         res = PRV.test_connection(cfg)
         ok(not res["ok"], "401 判定为失败")
-        ok("401" in res["message"], "原因里带状态码")
-        ok("API Key" in res["message"], "原因里点明是密钥问题")
+        ok("401" in res["message"], "原因里带状态码（实际：%r）" % res["message"])
+        ok("API Key" in res["message"], "原因里点明是密钥问题（实际：%r）" % res["message"])
     finally:
         srv.shutdown()
 

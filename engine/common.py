@@ -26,6 +26,7 @@ from . import (APP_NAME, APP_VER, BACKUP_DIR_NAME, LOG_DIR_NAME, LOG_SCHEMA,
                ST_SKIP, ST_CONFLICT, TEMP_PREFIX)
 from .rules import INVALID_NAME_CHARS, MAX_NAME_LEN, RESERVED_NAMES
 from .scan import nkey, natural_key
+from .context import split_ext
 
 # 名字合法性只有一处定义：engine/rules.py（规则与校验共用同一张表）
 ILLEGAL_CHARS = INVALID_NAME_CHARS
@@ -62,6 +63,22 @@ def name_problem(name: str, is_dir: bool = False) -> str:
     if len(name) > MAX_NAME_LEN:
         return "名字过长（%d > %d）" % (len(name), MAX_NAME_LEN)
     return ""
+
+
+def nameless_problem(new: str, old: str, is_dir: bool = False) -> str:
+    """规则把**文件**的名字改没了？（返回原因，空串表示没问题）
+
+    单看新名字是看不出来的：`abc.txt` 被删掉主干后是 `.txt`，
+    而 `.txt` 本身在 Windows 上合法（`.gitignore` 这类点文件也合法）。
+    所以只能拿原名做对照：新名字恰好只剩**原来的扩展名**时，才算"名字被删空"。
+    """
+    if is_dir or not new:
+        return ""
+    _stem, ext = split_ext(old or "")
+    if ext and os.path.normcase(new) == os.path.normcase(ext):
+        return "名字不能为空（只剩扩展名 %s）" % ext
+    return ""
+
 
 def safe_rel(rel: str) -> str:
     return os.path.normcase(rel or "")
@@ -138,15 +155,18 @@ def validate_items(items: Iterable, dir_keys: Optional[set] = None,
         it.note = ""
         old, new = it.name, it.new_name
         if not new:
+            # 规则把名字整个删空（文件夹最常见）：这是"规则产出非法名字"，
+            # 不是"规则没生效"。旧实现标成"名称未变"，用户会以为规则没起作用。
             it.new_name = old
-            it.status = ST_SAME
-            it.note = "规则未改变名称"
+            it.status = ST_ERROR
+            it.note = "规则把名字删空了"
             continue
         if new == old:
             it.status = ST_SAME
             it.note = "规则未改变名称"
             continue
-        prob = name_problem(new, getattr(it, "is_dir", False))
+        prob = name_problem(new, getattr(it, "is_dir", False)) \
+            or nameless_problem(new, old, getattr(it, "is_dir", False))
         if prob:
             it.status = ST_ERROR
             it.note = prob
@@ -333,15 +353,16 @@ def execute(items: Iterable, progress: Optional[Callable[[int, int, str], None]]
                 rename_with_retry(tmp, dst)
             except OSError as exc:
                 step.error = str(exc)
-                # 先撤本组已落位的，再把本组还没落位的临时名撤回原名
+                # 已落位的先退回临时名，再让 _rollback_temps 把它们连同还没落位的
+                # 一起挪回**原名**。旧实现把已落位的从回滚列表里过滤掉了，于是这些
+                # 文件永远停在 __nk_tmp_xxxx 上（内容在、名字没了），却报告"已回滚"。
                 for s2, t2, d2 in reversed(final):
                     try:
                         if os.path.exists(d2):
                             rename_with_retry(d2, t2)
                     except OSError:
                         s2.error = "回滚失败：%s" % d2
-                landed = {id(f[0]) for f in final}
-                _rollback_temps([p for p in moved if id(p[0]) not in landed])
+                _rollback_temps(moved)
                 for s2, _t2, _d2 in final:
                     s2.ok = False
                     s2.error = s2.error or "已回滚"
@@ -362,10 +383,13 @@ def execute(items: Iterable, progress: Optional[Callable[[int, int, str], None]]
 
 
 def _rollback_temps(moved) -> None:
-    """把还没落位的临时名挪回原名。
+    """把临时名挪回原名。
 
     moved 的元素是 (RenameStep, 中转前的真实路径, 临时名) 或旧式
     (RenameStep, 临时名)，两种都认，避免调用点各自转换。
+
+    失败项的 error 里已经有真正的原因（哪个文件被占用/没权限），
+    别用"已回滚"盖掉它 —— 那会让用户彻底查不到为什么失败。
     """
     for entry in reversed(list(moved)):
         step, src, tmp = (entry if len(entry) == 3
@@ -374,23 +398,29 @@ def _rollback_temps(moved) -> None:
             if os.path.exists(tmp):
                 rename_with_retry(tmp, src)
                 step.ok = False
-                step.error = "已回滚"
+                if not step.error:
+                    step.error = "已回滚"
         except OSError:
             step.error = "回滚失败：%s" % tmp
 
 
 def find_temp_leftovers(root: str, max_depth: int = 8) -> List[str]:
-    """找出上次崩溃遗留的临时名文件（BatchRenamer 的抢救功能）。"""
+    """找出上次崩溃遗留的临时名文件（BatchRenamer 的抢救功能）。
+
+    这些名字里没有原始文件名的任何线索（`__nk_tmp_` + 随机串），
+    所以只能"找出来给人看"，不能自动还原 —— 界面/命令行都只负责列清单。
+    """
     found: List[str] = []
     if not os.path.isdir(root):
         return found
     root = os.path.abspath(root)
+    skip_dirs = {name.lower() for name in (LOG_DIR_NAME, BACKUP_DIR_NAME)}
     for dirpath, dirnames, filenames in os.walk(root):
         if dirpath.count(os.sep) - root.count(os.sep) >= max_depth:
             dirnames[:] = []
-        for skip in (LOG_DIR_NAME, BACKUP_DIR_NAME):
-            if skip in dirnames:
-                dirnames.remove(skip)
+        # 与 scan.LOG_DIR_SKIP 同一套口径：Windows 目录名大小写不敏感，
+        # 直接比对 "Name_backup" 会漏掉 "name_backup"。
+        dirnames[:] = [d for d in dirnames if d.lower() not in skip_dirs]
         for name in dirnames + filenames:
             if name.startswith(TEMP_PREFIX):
                 found.append(os.path.join(dirpath, name))
@@ -586,19 +616,59 @@ def load_log(path: str) -> dict:
 
 
 def log_pairs(data: dict) -> List[Tuple[str, str]]:
-    out = []
-    for p in data.get("pairs") or []:
+    """从日志里取 [(旧路径, 新路径)]。
+
+    日志文件是用户可编辑的普通 JSON，结构可能被改坏（数组、字符串、
+    甚至 `"pairs": [1, 2]`）。这里一律按"能读的读、读不了的跳过"处理 ——
+    一份坏日志不该让整份记录（乃至整个「执行记录」页）都读不出来。
+    """
+    out: List[Tuple[str, str]] = []
+    if not isinstance(data, dict):
+        return out
+    items = data.get("pairs")
+    if not isinstance(items, list):
+        return out
+    for p in items:
+        if not isinstance(p, dict):
+            continue
         old, new = p.get("old"), p.get("new")
-        if old and new:
+        if isinstance(old, str) and isinstance(new, str) and old and new:
             out.append((old, new))
     return out
+
+
+def _rewrite_log(path: str, data: dict, pairs: List[Tuple[str, str]],
+                 missing: List[str]) -> None:
+    """把"还没还原成功的项"写回日志，其余字段原样保留。
+
+    这样重复点撤销时只会重试剩下的那几项，而不会把已经还原过的
+    条目又算成"找不到"（旧实现因此永远删不掉日志，每次都报"未完成"）。
+    """
+    payload = dict(data)
+    payload["pairs"] = [{"old": o, "new": n} for o, n in pairs]
+    note = "仍有 %d 项未还原" % len(pairs)
+    if missing:
+        note += "（%d 项原文件已不存在，已跳过）" % len(missing)
+    payload["note"] = note
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def undo(log_path: str, progress: Optional[Callable[[int, int, str], None]] = None
          ) -> Tuple[bool, List[str]]:
     """按日志逆序还原。绝不覆盖已存在的文件（沿用 BatchRenamer 的保守策略）。
 
-    任一步失败都保留日志，便于人工处理——宁可少删一次日志，也不丢信息。
+    幂等：还原成功的条目不会再参与下一次撤销。
+    还有没还原成的项时，把**剩下的项**写回日志（便于人工处理 / 下次重试）；
+    全部还原完（或只剩"原文件已不存在"）时删掉日志。
     """
     data = load_log(log_path)
     pairs = log_pairs(data)
@@ -611,24 +681,33 @@ def undo(log_path: str, progress: Optional[Callable[[int, int, str], None]] = No
     ordered = sorted(pairs, key=lambda p: (p[1].count(os.sep),
                                            natural_key(os.path.basename(p[1]))))
     errors: List[str] = []
+    missing: List[str] = []
+    pending: List[Tuple[str, str]] = []
     total = len(ordered)
     for i, (old, new) in enumerate(ordered):
         if progress:
             progress(i + 1, total, "还原 %s" % os.path.basename(new))
         if not os.path.exists(new):
-            errors.append("找不到：%s" % new)
+            # 目标已经不在了（用户删了/挪了）：没什么可还原的，跳过即可。
+            # 这不算失败，否则"撤销过一次"就会让日志永远删不掉。
+            missing.append(new)
             continue
         if os.path.exists(old):
             errors.append("已存在，跳过：%s" % old)
+            pending.append((old, new))
             continue
         try:
             os.makedirs(os.path.dirname(old), exist_ok=True)
             rename_with_retry(new, old)
         except OSError as exc:
             errors.append("%s -> %s：%s" % (new, old, exc))
-    if not errors:
-        try:
-            os.remove(log_path)
-        except OSError:
-            pass
-    return (not errors), errors
+            pending.append((old, new))
+    if pending:
+        _rewrite_log(log_path, data, pending, missing)
+        return False, errors
+    # 该还原的都还原了（其余是"原文件已不存在"）：日志没有继续存在的意义
+    try:
+        os.remove(log_path)
+    except OSError:
+        pass
+    return True, []

@@ -704,8 +704,14 @@ class WorkspacePage(QWidget):
 
         folder = os.path.dirname(getattr(it, "path", ""))
         root = self.state.root
-        if root and folder.lower().startswith(root.lower()):
-            folder = folder[len(root):].lstrip("\\/") or "."
+        # 必须按"目录边界"比前缀：`D:\photo` 不能把 `D:\photo2\x` 截成 "2\x"
+        if root:
+            cut = root.rstrip("\\/")
+            low_f, low_r = folder.lower(), cut.lower()
+            if low_f == low_r:
+                folder = "."
+            elif low_f.startswith(low_r + os.sep):
+                folder = folder[len(cut) + 1:]
         c_dir = Elided(folder, 12, 400, C["t3"] if skipped else C["t2"])
         c_st = Label(A.status_text(status) if plan_ready else "已扫描", 12, 400,
                      STATUS_TONE.get(status, C["t2"]))
@@ -1359,6 +1365,7 @@ class WorkspacePage(QWidget):
             return
         self.state.root = root
         self.state.selected = ()
+        self.state.strict_selected = False
         self.bundle = None
         self._refresh_preview()
         self._refresh_summary()
@@ -1401,14 +1408,20 @@ class WorkspacePage(QWidget):
             return
         if len(items) == 1 and os.path.isdir(items[0]):
             self.state.selected = ()
+            self.state.strict_selected = False
             root = items[0]
         else:
             self.state.selected = tuple(items)
             try:
                 root = os.path.commonpath([p if os.path.isdir(p) else os.path.dirname(p)
                                            for p in items])
+                self.state.strict_selected = False
             except ValueError:
+                # 跨盘符：没有公共父目录。根目录取第一项的父目录（只用来显示与
+                # 记日志），同时打开"严格按选中项收"，免得把父目录里其它无关
+                # 条目一起拉进待改名列表。
                 root = os.path.dirname(items[0])
+                self.state.strict_selected = True
         if root:
             self.path.setText(root)
             self.state.root = root
@@ -1602,6 +1615,12 @@ class WorkspacePage(QWidget):
     def _apply_done(self, result):
         ok = bool(getattr(result, "ok", False))
         msg = str(getattr(result, "message", "") or "")
+        # 回滚万一没做干净（例如文件被别的程序锁住），至少要让用户知道
+        # 有东西停在了 __nk_tmp_* 上，而不是只看到一句"失败 N 项"。
+        if not ok:
+            hint = self._leftover_hint()
+            if hint:
+                msg += hint
         # 撤销日志路径不再进状态槽（执行记录页有完整列表），只报结果本身
         self._notice_msg(msg, "success" if ok else "error")
         self.status_message.emit(msg)
@@ -1609,13 +1628,34 @@ class WorkspacePage(QWidget):
         self._refresh_preview()
         self._refresh_summary()
 
+    def _leftover_hint(self) -> str:
+        """失败后检查一下目录里有没有遗留的临时名文件（取前几个做提示）。"""
+        root = str(self.state.root or "")
+        if not root or not os.path.isdir(root):
+            return ""
+        try:
+            left = A.temp_leftovers(root)
+        except Exception:                       # noqa: BLE001 - 提示失败不该影响主流程
+            return ""
+        if not left:
+            return ""
+        sample = "、".join(os.path.basename(p) for p in left[:3])
+        more = "…" if len(left) > 3 else ""
+        return ("；另发现 %d 个临时名残留（%s%s），"
+                "可用 `main.py leftovers \"%s\"` 查看后手工处理"
+                % (len(left), sample, more, root))
+
     # ================= 预设互通 =================
     def collect_preset(self, name: str):
         return A.preset_from_state(name, self.rules, self.state)
 
     def apply_preset(self, preset):
+        # 预设里不含根目录（`FormState.scan_dict()` 不写 root，页面文案也写着
+        # "不含根目录"），所以套预设必须**保住当前目录**：重建 FormState 会把
+        # 用户刚选好的目录一起清空，还得重新选一次。
+        root = str(self.state.root or "")
         self.rules = list(preset.rules or [])
-        self.state = A.FormState()
+        self.state = A.FormState(root=root)
         if preset.scan:
             self.state.apply_scan_dict(preset.scan)
         if preset.plan:
@@ -1626,6 +1666,9 @@ class WorkspacePage(QWidget):
         self.only.set_value(self.state.only)
         self._refresh_all()
         self.status_message.emit("已应用预设：%s" % preset.name)
+        # 目录还在就直接按新预设重扫一遍，省掉"再点一次扫描"这一步
+        if self.rules and root and os.path.isdir(root):
+            self.scan(plan_after=True)
 
     def shutdown(self):
         self.runner.wait(3000)

@@ -452,7 +452,14 @@ class LlmPage(QWidget):
         """窗口启动时调用：读一遍已保存的配置。"""
         self.reload(read_instruction=True)
 
-    def reload(self, read_instruction=False):
+    def reload(self, read_instruction=False, force=False):
+        """从磁盘重新读一遍配置。
+
+        force=False（默认）：已有未保存的修改时**不覆盖** —— 用户粘完密钥
+        切到别的页再切回来，输入框不该被悄悄清空。
+        """
+        if self._dirty and not force:
+            return
         cfg = A.llm_provider_config()
         self._cfg = cfg
         self._key_input = ""

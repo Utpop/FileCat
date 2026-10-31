@@ -32,6 +32,7 @@ import re
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -440,6 +441,35 @@ def effective_config() -> "LLMConfig":
 # HTTP 底座
 # --------------------------------------------------------------------------- #
 
+# 两个 opener 只在导入时建一次：建 opener 会读环境变量（代理设置），
+# 每次请求都建一遍既慢又可能读到已被改动的环境。
+_DEFAULT_OPENER = urllib.request.build_opener()
+_LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]")
+
+
+def opener_for(url: str):
+    """按目标地址挑 opener：回环地址一律**绕过系统代理**。
+
+    本机装了代理（Clash / 企业代理之类）时，`HTTP(S)_PROXY` 会让发往
+    127.0.0.1 的请求也交给代理，于是本地 Ollama 的失败原因变成代理的
+    "网关错误 502 · upstream connect failed"，既连不上也看不懂。
+    engine.llm 的直接请求也走这里，保证两处口径一致。
+    """
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    except ValueError:
+        host = ""
+    if host in _LOOPBACK_HOSTS or host.endswith(".localhost"):
+        return _LOOPBACK_OPENER
+    return _DEFAULT_OPENER
+
+
+def open_url(req, timeout: int):
+    """发请求（回环不代理）。engine.llm 用它，避免两套逻辑各写一遍。"""
+    return opener_for(req.full_url).open(req, timeout=timeout)
+
+
 def _headers(cfg: ProviderConfig, with_auth: bool = True) -> Dict[str, str]:
     head = {"Content-Type": "application/json",
             "Accept": "application/json"}
@@ -463,7 +493,7 @@ def _request(method: str, url: str, payload: Optional[dict],
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as fh:
+        with opener_for(url).open(req, timeout=timeout) as fh:
             body = fh.read().decode("utf-8", "replace")
             return fh.status, body, ""
     except urllib.error.HTTPError as exc:

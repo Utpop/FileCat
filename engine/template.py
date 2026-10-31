@@ -19,6 +19,11 @@ from __future__ import annotations
 import random
 import re
 
+# 补零宽度的硬上限。名字总长上限只有 255，再宽毫无意义；但没有上限时
+# `{n:200000000}` / `补零宽度=20000000` 这种手误能一次产出几十 MB 的字符串
+# （1500 个对象直接把内存吃满）。上下限只有这一处定义，规则与模板共用。
+MAX_WIDTH = 64
+
 # --------------------------------------------------------------------------- #
 # selector：把规则限制在名字的某一段
 # --------------------------------------------------------------------------- #
@@ -122,7 +127,10 @@ def splice(text: str, mode: str, charset: str, occurrence: int,
     if mode == "before":
         return new + text[idx:]
     if mode == "until":
-        return text[: idx + 1] + new
+        # until 选中的是「含分隔符的头部」，拼回时必须是「新片段 + 分隔符之后」。
+        # 这里曾经抄了 after 的公式（text[:i+1] + new），结果把原头部又接了一遍、
+        # 尾部整段丢掉：case=upper 会把 show-2026-10-19 改成 show-SHOW-。
+        return new + text[idx + 1:]
     return text[:idx] + new          # from
 
 
@@ -228,6 +236,7 @@ def _num_text(num, width) -> str:
         w = int(width or 0)
     except (TypeError, ValueError):
         w = 0
+    w = max(0, min(w, MAX_WIDTH))
     return str(n).zfill(w) if w > 0 else str(n)
 
 
@@ -239,7 +248,7 @@ def apply_num_format(value, spec: str) -> str:
     m = re.fullmatch(r"0*(\d+)", spec)
     if not m:
         return str(value)
-    return str(value).zfill(int(m.group(1)))
+    return str(value).zfill(min(int(m.group(1)), MAX_WIDTH))
 
 
 def _lookup(ctx, key: str) -> str:
@@ -346,6 +355,10 @@ def render(text: str, ctx=None, num=None, width=1) -> str:
         except (TypeError, ValueError):
             width = 0
     out = str(text)
+    # 0) 转义：\x41 / \x{1F600} / \n \t \r（ReNamer 的写法）。
+    #    必须先做，否则 `\x7B`（'{'）这类会被后面的变量替换吃掉。
+    if "\\" in out:
+        out = expand_escape(out)
     # 0) `#Name#` 取变量；整串只有一个 `#` 时当计数器（ReNamer 的老写法）。
     #    必须在任何变量替换之前处理，否则变量值里的 `#` 会被当成计数器改写
     #    （a#b.txt 曾变成 a03b.txt）。

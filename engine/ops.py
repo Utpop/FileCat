@@ -82,6 +82,10 @@ def apply(items, rules=(), opts: Optional[P.PlanOptions] = None,
     msg = "已重命名 %d 项" % ok_n
     if bad:
         msg += "，失败 %d 项（已回滚）" % bad
+    if ok_n and not log_path:
+        # 日志写不进去时绝不能只报"成功"：这批改名将无法撤销，
+        # 而执行前的确认框明确承诺了"会写撤销日志"。
+        msg += "；但撤销日志没能写入（日志目录不可写），本次改名无法撤销"
     return Result(plan=plan, steps=steps, log_path=log_path, message=msg)
 
 

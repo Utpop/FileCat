@@ -181,7 +181,10 @@ class ScanOptions:
     sort_mode: str = "name_asc"
     max_depth: int = MAX_DEPTH
     follow_log_dirs: bool = False                 # 是否把 _rename_logs 也当对象处理
-    selected: Optional[set] = None                # 勾选的绝对路径集合；None=全部
+    selected: Optional[set] = None                # 勾选的路径集合（nkey 归一化后）；None=全部
+    # True = 严格按 selected 收（跨盘多选时用：root 里没被选中的一律不收）。
+    # False（默认）= 有选中项落在 root 之外时放宽成「root 全部 + 这些」。
+    strict_selected: bool = False
 
     def wanted_kind(self, name: str, is_dir: bool) -> Optional[str]:
         k = kind_of(name, is_dir)
@@ -231,7 +234,9 @@ def scan(opts: ScanOptions,
     root = os.path.abspath(opts.root) if opts.root else ""
     res = ScanResult()
     root_key = nkey(root) if root else ""
-    selected_keys = set(opts.selected) if opts.selected else None
+    # 调用方可能直接传原始绝对路径（字段名就叫 absolute paths），
+    # 这里统一归一化一次：否则大小写对不上，选中项会被静默全部丢掉。
+    selected_keys = ({nkey(p) for p in opts.selected} if opts.selected else None)
 
     def under(path_key: str, base_key: str) -> bool:
         return bool(base_key) and (path_key == base_key
@@ -254,7 +259,8 @@ def scan(opts: ScanOptions,
     # 选中的条目里只要有一个在 root 之外（例如从别的文件夹拖进来），
     # 语义就从「只要这些」变成「root 全都要 + 额外这些」：否则往已扫出的
     # 列表里拖一个外部文件，会连原来的内容一起消失。
-    mixed_scope = bool(selected_keys and root_key
+    # strict_selected=True 时不做这个放宽 —— 跨盘多选靠它保证「只要这几个」。
+    mixed_scope = bool(selected_keys and root_key and not opts.strict_selected
                        and any(not under(key, root_key) for key in selected_keys))
 
     def hit(path: str) -> bool:

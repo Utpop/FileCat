@@ -206,6 +206,9 @@ def build_parser() -> argparse.ArgumentParser:
     un.add_argument("--list", action="store_true", help="只列日志")
     un.add_argument("--quiet", "-q", action="store_true")
 
+    lf = sub.add_parser("leftovers", help="列出执行被中断后遗留的临时名文件")
+    lf.add_argument("root", nargs="?", default="", help="要检查的目录")
+
     sub.add_parser("rules", help="列出全部规则类型")
     sub.add_parser("presets", help="列出内置与已保存的预设")
     return p
@@ -317,7 +320,12 @@ def cmd_rename(args) -> int:
         print("提示：%s" % w)
 
     if args.csv:
-        ops.export_csv(res, args.csv)
+        try:
+            ops.export_csv(res, args.csv)
+        except OSError as exc:
+            # 目录不存在/没权限是常见手误，不该把整个命令崩掉
+            print("导出失败：%s（%s）" % (args.csv, exc))
+            return 1
         print("已导出：%s" % args.csv)
 
     if not args.apply:
@@ -339,6 +347,10 @@ def cmd_rename(args) -> int:
 def cmd_undo(args) -> int:
     logs = []
     if args.log:
+        # 显式指定的日志：不存在就直说，别让它一路走到 open() 抛栈
+        if not os.path.isfile(args.log):
+            print("日志不存在：%s" % args.log)
+            return 1
         logs = [args.log]
     elif args.root:
         logs = C.list_logs(args.root)
@@ -355,15 +367,46 @@ def cmd_undo(args) -> int:
             except (OSError, ValueError):
                 print("%s（无法读取）" % path)
                 continue
+            if not isinstance(data, dict):
+                print("%s（格式不认识）" % path)
+                continue
             print("%s  %s  %s  共 %d 项"
                   % (path, data.get("time", ""), data.get("root", ""),
-                     len(data.get("pairs") or [])))
+                     len(C.log_pairs(data))))
         return 0
     latest = logs[-1]
     print("撤销：%s" % latest)
-    res = ops.undo(latest, _progress(args.quiet))
+    try:
+        res = ops.undo(latest, _progress(args.quiet))
+    except (OSError, ValueError) as exc:
+        # 日志被改坏（不是 JSON / 结构不对）时也给一句人话
+        print("无法读取日志：%s（%s）" % (latest, exc))
+        return 1
     print(res.message)
     return 0 if res.ok else 1
+
+
+def cmd_leftovers(args) -> int:
+    """列出执行被中断后遗留的临时名文件（`__nk_tmp_*`）。
+
+    这些名字里没有原名的任何线索，程序无权替用户猜，只能如实列出来。
+    有残留时返回 1，方便脚本/批处理发现异常。
+    """
+    root = args.root or "."
+    if not os.path.isdir(root):
+        print("目录不存在：%s" % root)
+        return 2
+    found = C.find_temp_leftovers(root)
+    if not found:
+        print("没有临时名残留：%s" % os.path.abspath(root))
+        return 0
+    print("发现 %d 个临时名残留（上次执行被中断时留下的）：" % len(found))
+    for path in found:
+        print("  " + path)
+    print()
+    print("文件内容完好，但原名已无从还原（临时名里没有原名线索）；")
+    print("请按修改时间/大小辨认后手工改名，撤销日志里通常也有对应记录。")
+    return 1
 
 
 def cmd_rules(_args) -> int:
@@ -404,6 +447,8 @@ def main(argv=None) -> int:
         return cmd_rename(args)
     if args.cmd == "undo":
         return cmd_undo(args)
+    if args.cmd == "leftovers":
+        return cmd_leftovers(args)
     if args.cmd == "rules":
         return cmd_rules(args)
     if args.cmd == "presets":

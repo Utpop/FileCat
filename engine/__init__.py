@@ -21,7 +21,7 @@ import shutil
 import sys
 
 APP_NAME = "NameCat"
-APP_VER = "1.6.0"
+APP_VER = "1.6.2"
 LOG_DIR_NAME = "_rename_logs"
 # 撤销日志统一存放的文件夹名（放在**程序目录**下，与被改名的目标目录无关）
 BACKUP_DIR_NAME = "Name_backup"
@@ -59,6 +59,8 @@ def program_dir() -> str:
 
 
 _BACKUP_DIR = ""
+# 旧目录迁移是否已经跑过（每个进程一次；见 migrate_legacy_appdata）
+_MIGRATED = False
 
 
 def backup_dir() -> str:
@@ -104,7 +106,14 @@ def migrate_legacy_appdata() -> None:
 
     只做三件安全的事：建新目录、复制缺失文件、跳过已存在文件。
     旧目录保持原样 —— 用户可能还要回退到旧版本。
+
+    每个进程只真正走一遍：`appdata_dir()` 是热点（取配置路径、预设目录、
+    密钥路径、要求文件路径都经过它），每次都 os.walk 旧目录纯属浪费。
     """
+    global _MIGRATED
+    if _MIGRATED:
+        return
+    _MIGRATED = True
     base = appdata_base()
     target = os.path.join(base, DATA_DIR_NAME)
     if not os.path.isdir(target):

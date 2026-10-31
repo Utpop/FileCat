@@ -463,6 +463,23 @@ class LLMClient:
         return r.mapping.get(name, "")
 
 
+def _urlopen(req, timeout):
+    """发一个 HTTP 请求；回环地址绕过系统代理（与 engine.provider 同一口径）。
+
+    本机装了代理时，本地 Ollama（127.0.0.1:11434）的请求会被塞给代理，
+    失败原因变成代理的 502，看起来像"服务没起来"。
+    """
+    opener = None
+    try:
+        from . import provider as _prv          # 延迟导入：provider 也 import 本模块
+        opener = _prv.opener_for(req.full_url)
+    except Exception:                            # noqa: BLE001 - 挑 opener 失败就用默认
+        opener = None
+    if opener is None:
+        return urllib.request.urlopen(req, timeout=timeout)
+    return opener.open(req, timeout=timeout)
+
+
 class HttpChatClient(LLMClient):
     """OpenAI 兼容接口。
 
@@ -518,7 +535,7 @@ class HttpChatClient(LLMClient):
         import time as _time
         started = _time.time()
         try:
-            with urllib.request.urlopen(req, timeout=self.config.timeout) as fh:
+            with _urlopen(req, self.config.timeout) as fh:
                 data = json.loads(fh.read().decode("utf-8", "replace"))
         finally:
             # 真实请求的耗时记进状态里（界面左下角的气泡显示的就是它）
@@ -626,7 +643,7 @@ class OllamaClient(LLMClient):
         req = urllib.request.Request(
             base, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             method="POST", headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=self.config.timeout) as fh:
+        with _urlopen(req, self.config.timeout) as fh:
             data = json.loads(fh.read().decode("utf-8", "replace"))
         return (data.get("message") or {}).get("content", "")
 

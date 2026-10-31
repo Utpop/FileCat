@@ -101,6 +101,8 @@ class FormState:
     # 「扫描对象…」直接指定的条目（绝对路径）。空 = 扫整个 root。
     # 对应引擎 ScanOptions.selected，界面不自作过滤。
     selected: Tuple[str, ...] = ()
+    # 严格按 selected 收（跨盘多选：没有公共父目录，root 里没选中的一律不收）
+    strict_selected: bool = False
     # 计划
     start: int = 1
     step: int = 1
@@ -125,6 +127,7 @@ class FormState:
             sort_mode=self.sort_mode or "name_asc",
             max_depth=max(1, min(int(self.max_depth or MAX_DEPTH), MAX_DEPTH)),
             selected=(set(nkey(p) for p in self.selected) if self.selected else None),
+            strict_selected=bool(self.strict_selected and self.selected),
         )
 
     def plan_options(self, dry_run: bool = True) -> P.PlanOptions:
@@ -393,7 +396,6 @@ KIND_FIELDS: Dict[str, List[Tuple[str, str, str, object]]] = {
                                      ("capitalize", "整个名字首字母大写")])],
     "trim": [("a", "要剥掉的字符集", "line", "留空 = 剥空白，并去掉结尾的点")],
     "collapse": [("a", "要合并的字符", "line", "例如一个空格")],
-    "number": [("c", "位置", "combo", _NUM_POS)],
     "template": [("a", "模板原文", "template", "点击右侧按钮打开模板编辑器")],
     "slug": [("a", "分隔符", "line", "默认 _")],
     "translit": [],
@@ -446,13 +448,14 @@ KIND_FLAGS: Dict[str, set] = {
     kind: {"selector", "skip_ext", "occurrence"} for kind in R.RULE_KIND_IDS
 }
 # 扩展名严格由模板/扩展名规则/LLM 自己管，skip_ext 没有意义
-for _k in ("template", "extension", "llm"):
+for _k in ("template", "llm"):
     KIND_FLAGS[_k] = {"selector", "occurrence"}
+# 扩展名规则连选择器都不需要（它永远作用于整个名字）
+KIND_FLAGS["extension"] = set()
 # number 的分隔符是「锚点」，选择器会让两者抢同一个字段
 KIND_FLAGS["number"] = {"skip_ext", "occurrence"}
 # 序列化整名就是号码，选择器与「不含扩展名」都无从谈起
 KIND_FLAGS["renumber"] = {"occurrence"}
-KIND_FLAGS["extension"] = set()
 KIND_FLAGS["remove_after"] = {"selector", "skip_ext", "occurrence", "keep_sep"}
 KIND_FLAGS["remove_before"] = {"selector", "skip_ext", "occurrence", "keep_sep"}
 
@@ -605,6 +608,33 @@ def rule_problems(rule: R.Rule) -> List[str]:
             int(str(get_field(rule, "extras.max_len") or 24))
         except (TypeError, ValueError):
             probs.append("「名字最大长度」要是整数")
+
+    # 未知规则（手改过的预设）：引擎已按"文本替换"兜底，这里要让人看见
+    unknown = str((rule.extras or {}).get("unknown_kind") or "")
+    if unknown:
+        probs.append("未知规则类型「%s」，当前按文本替换处理" % unknown)
+
+    # 宽度类参数有硬上限：没有上限时一个对象就能撑出几十 MB 的名字
+    width_field = {"pad_numbers": ("a", "目标宽度"),
+                   "number": ("b", "补零宽度"),
+                   "renumber": ("b", "补零宽度")}.get(kind)
+    if width_field:
+        key, label = width_field
+        val = str(get_field(rule, key) or "").strip()
+        if val:
+            try:
+                if int(val) > TPL.MAX_WIDTH:
+                    probs.append("「%s」最多 %d（再宽对文件名没有意义）"
+                                 % (label, TPL.MAX_WIDTH))
+            except (TypeError, ValueError):
+                pass
+    if kind == "randomize" and str(a or "").strip():
+        try:
+            n = int(a)
+            if n < 1 or n > R.MAX_RANDOM:
+                probs.append("「随机串长度」要在 1~%d 之间" % R.MAX_RANDOM)
+        except (TypeError, ValueError):
+            probs.append("「随机串长度」要是整数")
     return probs
 
 
@@ -744,26 +774,29 @@ def logs(root: str) -> List[dict]:
     """把撤销日志读成界面要用的行。字段全部来自真实 schema。
 
     root 给了 = 只看那个目标目录的；root 空 = 全部（所有目录的日志混在一起）。
+    单份日志读不出来（被改坏）只跳过那一份 —— 一份坏日志不该让整页空白。
     """
     rows = []
     for path in C.list_logs(root or ""):
         try:
             data = C.load_log(path)
-        except (OSError, ValueError):
+            if not isinstance(data, dict):
+                continue
+            pairs = C.log_pairs(data)
+            rows.append({
+                "path": path,
+                "time": str(data.get("time") or ""),
+                "kind": str(data.get("kind") or ""),
+                "schema": data.get("schema"),
+                "note": str(data.get("note") or ""),
+                "root": str(data.get("root") or ""),
+                "count": len(pairs),
+                "summary": data.get("summary") or {},
+                "pairs": pairs,
+                "name": os.path.basename(path),
+            })
+        except (OSError, ValueError, AttributeError, TypeError):
             continue
-        pairs = C.log_pairs(data)
-        rows.append({
-            "path": path,
-            "time": str(data.get("time") or ""),
-            "kind": str(data.get("kind") or ""),
-            "schema": data.get("schema"),
-            "note": str(data.get("note") or ""),
-            "root": str(data.get("root") or ""),
-            "count": len(pairs),
-            "summary": data.get("summary") or {},
-            "pairs": pairs,
-            "name": os.path.basename(path),
-        })
     rows.sort(key=lambda r: r["time"], reverse=True)
     return rows
 
