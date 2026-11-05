@@ -26,16 +26,16 @@ ROOT = os.path.dirname(HERE)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from engine import common as C            # noqa: E402
-from engine import llm as L               # noqa: E402
-from engine import ops                    # noqa: E402
-from engine import plan as P              # noqa: E402
-from engine import presets as PS          # noqa: E402
-from engine import rules as R             # noqa: E402
-from engine import template as T          # noqa: E402
+from namecat_py import common as C            # noqa: E402
+from namecat_py import llm as L               # noqa: E402
+from namecat_py import ops                    # noqa: E402
+from namecat_py import plan as P              # noqa: E402
+from namecat_py import presets as PS          # noqa: E402
+from namecat_py import rules as R             # noqa: E402
+from namecat_py import template as T          # noqa: E402
 from engine.cli import install_safe_output   # noqa: E402  控制台装不下的符号先降级
-from engine.context import Item, NameContext   # noqa: E402
-from engine.scan import (KIND_DIR, KIND_FILE, KIND_IMAGE, KIND_VIDEO,  # noqa: E402
+from namecat_py.context import Item, NameContext   # noqa: E402
+from namecat_py.scan import (KIND_DIR, KIND_FILE, KIND_IMAGE, KIND_VIDEO,  # noqa: E402
                          SORT_KEYS, ScanOptions, check_file_magic, kind_of,
                          natural_key, scan)
 
@@ -72,7 +72,13 @@ def eq(got, want, msg=""):
 # 沙箱目录
 # --------------------------------------------------------------------------- #
 
-SANDBOX = os.path.join(ROOT, "_verify_tmp")
+# 自己的沙箱，不复用 `_verify_tmp`。
+#
+# 教训：这一行原本是 `_verify_tmp`，而收尾时 `shutil.rmtree(SANDBOX)` 会把整个
+# 目录删掉 —— 那里还放着迁移期的对拍脚本与参考实现，跑一次测试就全没了。
+# 各自的临时目录各管各的：这里是 `_verify_run/`，界面对着 `_verify_gui_tmp/`，
+# 边界用例对着 `_verify_edges/`。
+SANDBOX = os.path.join(ROOT, "_verify_run")
 # 撤销日志现在统一存在程序目录的 Name_backup 里；自检必须把它指到沙箱，
 # 否则跑一次测试就会往程序目录里塞一堆日志文件。
 os.environ["NAMECAT_LOG_DIR"] = os.path.join(SANDBOX, "_logs")
@@ -589,7 +595,7 @@ def test_merged_features():
 # --------------------------------------------------------------------------- #
 
 def test_llm():
-    from engine import llm as L
+    from namecat_py import llm as L
 
     case("L1 默认要求与可编辑要求文件")
     # 默认要求文件：必须指到沙箱去，否则用户改过 %APPDATA% 里的要求文件后，
@@ -759,7 +765,7 @@ def test_llm():
     os.environ[L.INSTRUCTION_ENV] = req      # 让「默认要求文件」指向它
     try:
         eq(L.read_instruction(), "只留地名", "环境变量指定的要求文件被读到")
-        import engine.plan as _P
+        import namecat_py.plan as _P
         res = scan(ScanOptions(root=box, kinds=(KIND_FILE,)))
         _P.build(res.items, [R.make_rule("llm")], P.PlanOptions(dry_run=True), None,
                  Spy(L.LLMConfig(provider="echo")))
@@ -1296,8 +1302,8 @@ def test_regressions():
 # --------------------------------------------------------------------------- #
 
 def test_provider():
-    from engine import provider as PRV
-    from engine import secrets
+    from namecat_py import provider as PRV
+    from namecat_py import secrets
 
     case("F1 供应商预设齐备（OpenAI 兼容为主）")
     keys = [p.key for p in PRV.PROVIDER_PRESETS]

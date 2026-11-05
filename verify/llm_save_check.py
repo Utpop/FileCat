@@ -46,7 +46,7 @@ base.FAMILY = base.load_fonts()
 app.setFont(base.F(12, 400))
 
 from adapters import engine_adapter as A  # noqa: E402
-from engine import provider as PRV, secrets  # noqa: E402
+from namecat_py import provider as PRV, secrets  # noqa: E402
 from ui.pages.llm_settings import LlmPage  # noqa: E402
 
 RESULTS = []

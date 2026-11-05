@@ -431,13 +431,16 @@ python verify\test_edges.py -v     :: 逐条打印
 ## 8. Rust 引擎迁移（1.6.3）—— 性能与打包验收
 
 引擎 12 个模块全部由 Python 改写为 Rust（`crates/namecat-core` + PyO3 绑定
-`crates/namecat-py`），`engine/*.py` 只剩一行 re-export。**行为等价性**由三份
-逐字段对拍脚本把关（`_verify_tmp/p{2,3,4}_equiv.py`，合计 3170 项 0 差异），
-本节只记**性能**与**发布链路**。
+`crates/namecat-py`）。2.0.0 时 `engine/*.py` 曾保留一层"一行 re-export"的转发壳，
+2.0.1 已全部删除（调用方直接 `from namecat_py.<模块> import …`）。
+
+**行为等价性**在迁移期由三份逐字段对拍脚本把关（合计 3170 项 0 差异）。那些脚本与
+参考实现是迁移期脚手架，2.0.1 一并清理；需要复核时从 `v1.6.3` 标签取回 Python 实现
+即可重跑。本节只记**性能**与**发布链路**。
 
 ### 8.1 基准（2000 个文件，同一规则链，新旧对跑）
 
-`PYTHONPATH=_vendor py -3 _verify_tmp/bench_engine.py`
+`PYTHONPATH=_vendor py -3 verify/bench.py`（脚本已入库，不再是临时脚手架）
 
 同一批文件、同一条规则链（`replace` + `remove_chars` + 三位 `number`）、
 同一个调用姿势，一边是 Rust 引擎，一边是 `_verify_tmp/ref/refengine/` 里
@@ -475,8 +478,8 @@ python verify\test_edges.py -v     :: 逐条打印
 
 ### 8.2 打包链路（P5）
 
-Rust 化之后的第一个发布陷阱：`engine/*.py` 里全是
-`from namecat_py.xxx import *`，**引擎不在包里 = 双击没反应**（窗口程序没有
+Rust 化之后的第一个发布陷阱：应用层到处是
+`from namecat_py.xxx import …`，**引擎不在包里 = 双击没反应**（窗口程序没有
 控制台，`ImportError` 只会弹一个框，进程卡住）。实测确认过这个问题真实存在：
 只靠 `--paths _vendor` 时，PyInstaller 的所有 TOC 里 `namecat_py` 命中数为 **0**。
 
@@ -531,3 +534,35 @@ PyInstaller 命令行没有"排除某个二进制"的开关，只有 `--exclude-
 | 打包后自检（改名 → 撤销） | 通过 |
 | exe 图形界面启动 | 窗口标题 `NameCat 1.6.3`，响应正常 |
 | exe 命令行 `rename … --apply` | 2 项改名成功，撤销日志正常写入 |
+
+### 8.4 2.0.1：移除 Python 兼容层
+
+2.0.0 保留的 12 个转发壳（`engine/<模块>.py` 里只有 docstring + 一行
+`from namecat_py.<模块> import *`）在 2.0.1 全部删除，调用方直接导入扩展。
+改动面：
+
+| 位置 | 改了什么 |
+|---|---|
+| `engine/` | 删 12 个转发壳，只剩 `__init__.py`（应用常量 / appdata）、`cli.py`、`llm_resolve.py` |
+| 应用代码 | `adapters/engine_adapter.py` 11 行、`ui/pages/workspace.py` 1 行、`engine/cli.py` 10 行 |
+| 自检脚本 | `verify/{run_tests,test_edges,ui_smoke,llm_save_check}.py` 共 25 行 |
+| Rust 侧 | `py_ops.rs` 里 7 处 `py.import("engine.xxx")` → `namecat_py.xxx`（另外 3 处 `engine` 根包调用保留：`appdata_dir` / `backup_dir` / `llm_resolve`） |
+| 闸门 | `verify/rust_check.py` 改为直接查 `namecat_py`（期望集仍是迁移前固化的 193 符号）；`--snapshot` 模式删除（已无处可取纯 Python 符号） |
+
+同时修掉两个验证工具的问题：
+
+- **`run_tests.py` 会删掉别人的验证资产**：它的沙箱根是 `_verify_tmp/`，收尾
+  `rmtree` 整目录，把放在同一目录下的对拍脚本与参考实现一起删了。改为自己的
+  `_verify_run/`，各套件（`_verify_edges/`、`_verify_gui_tmp/`、`_verify_bench/`）互不牵连。
+- **对拍脚本在临时目录里**：`bench_engine.py` 随之丢失，重写为入库的 `verify/bench.py`。
+
+验收（2.0.1，全部实测）：
+
+| 项 | 结果 |
+|---|---|
+| `verify/rust_check.py --fail-on-any` | 12 个模块 / 193 个符号，根常量 17 项一致 |
+| `verify/run_tests.py` | **410 断言通过 / 0 失败**（8.2 s） |
+| `verify/test_edges.py` | **190 断言通过 / 0 失败**，16 个缺陷探针全部"已修复" |
+| `verify/ui_smoke.py` | 全部规则 + 全流程 + 撤销 + 预设 + LLM 页，全通过 |
+| CLI 往返 | `rename --apply` → `undo` 文件名正确还原 |
+| 打包 | exe 29.8 MB / zip 29.6 MB，打包后自检通过 |

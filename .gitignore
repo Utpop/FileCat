@@ -16,7 +16,11 @@ dist/
 /target/
 
 # 验证脚本产生的临时目录与截图产物
+# 每个套件用自己的目录：run_tests→_verify_run，test_edges→_verify_edges，
+# ui_smoke→_verify_gui_tmp（跑完各自清理，互不牵连）
 _verify_tmp/
+_verify_run/
+_verify_bench/
 _verify_gui_tmp/
 _verify_shots/
 

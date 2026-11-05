@@ -21,10 +21,10 @@ engine.llm_resolve —— LLM 规则的"先批量问一次模型"阶段。
 
 from __future__ import annotations
 
-from . import llm as LLM
-from . import rules as R
-from . import template as tpl
-from .context import split_ext
+from namecat_py import llm as LLM
+from namecat_py import rules as R
+from namecat_py import template as tpl
+from namecat_py.context import split_ext
 
 
 def resolve(items, ctxs, chain, opts, client, notes):

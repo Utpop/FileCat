@@ -21,16 +21,16 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from engine import APP_NAME, APP_VER, STATUS_TEXT
-from engine import common as C
-from engine import llm as LLM
-from engine import ops as OPS
-from engine import plan as P
-from engine import presets as PS
-from engine import provider as PRV
-from engine import rules as R
-from engine import template as TPL
+from namecat_py import common as C
+from namecat_py import llm as LLM
+from namecat_py import ops as OPS
+from namecat_py import plan as P
+from namecat_py import presets as PS
+from namecat_py import provider as PRV
+from namecat_py import rules as R
+from namecat_py import template as TPL
 from engine.cli import ONLY_CHOICES          # 与命令行共用同一张映射表
-from engine.scan import (IMAGE_EXTS, KIND_DIR, KIND_FILE, KIND_IMAGE, KIND_TEXT,
+from namecat_py.scan import (IMAGE_EXTS, KIND_DIR, KIND_FILE, KIND_IMAGE, KIND_TEXT,
                          KIND_VIDEO, MAX_DEPTH, SORT_MODES, ScanOptions, VIDEO_EXTS,
                          nkey, scan)
 
@@ -688,7 +688,7 @@ def describe_chain(rules: Sequence) -> str:
 
 def template_variables() -> List[Tuple[str, str]]:
     """模板可用变量：以 NameContext.variables() 的真实键为准。"""
-    from engine.context import NameContext
+    from namecat_py.context import NameContext
 
     ctx = NameContext(os.path.join(os.getcwd(), "示例-2026-10-19.txt"),
                       "示例-2026-10-19.txt", False, 1, 1, 1, 4,
@@ -737,7 +737,7 @@ def render_preview(template: str, item=None) -> str:
         ctx = item._ctx_obj()
         num, width = item.num, item.width
     else:
-        from engine.context import NameContext
+        from namecat_py.context import NameContext
         ctx = NameContext(os.path.join(os.getcwd(), "示例-2026-10-19.txt"),
                           "示例-2026-10-19.txt", False, 1, 1, 1, 4,
                           st=_sample_stat())

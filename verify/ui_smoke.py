@@ -73,7 +73,7 @@ ws = w.page_ws
 
 print("== 2. 添加规则（全部种类全走一遍）==")
 tmpdir = tempfile.mkdtemp(prefix="nc_bug_")
-from engine.rules import RULE_KINDS  # 只为拿全量 kind 列表做遍历
+from namecat_py.rules import RULE_KINDS  # 只为拿全量 kind 列表做遍历
 for kind, text, _params, _note in RULE_KINDS:
     step("add_rule(%s)" % kind, lambda k=kind: ws.add_rule(k))
 print("   规则数：", len(ws.rules))

@@ -81,7 +81,9 @@ cargo workspace:
 
 ### 2.3 迁移策略：strangler（绞杀式）
 
-`engine/` 包名与模块名**不变**，每个 `.py` 逐步退化为一行 re-export：
+`engine/` 包名与模块名**不变**，每个 `.py` 逐步退化为一行 re-export
+（**实施结果**：这层转发壳只作为迁移期的过渡，2.0.1 已全部删除，调用方直接
+`from namecat_py.<模块> import …`）：
 
 ```python
 # engine/rules.py（过渡终态）

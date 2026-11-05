@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (QDialog, QFileDialog, QFrame, QGraphicsOpacityEff
                                QWidget)
 
 from adapters import engine_adapter as A
-from engine import rules as R
+from namecat_py import rules as R
 from ui.base import (C, F, R_XS, Badge, Button, Card, Check, Clickable, Chip,
                      Elided, EmptyState, Label, PageHead, Select, Strip,
                      fit_scroll_content, grid_row, hbox, hline, icon, scroll_area,

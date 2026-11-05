@@ -40,15 +40,15 @@ if ROOT not in sys.path:
 SANDBOX = os.path.join(ROOT, "_verify_edges")
 os.environ["NAMECAT_LOG_DIR"] = os.path.join(SANDBOX, "_logs")
 
-from engine import common as C                      # noqa: E402
-from engine import llm as L                         # noqa: E402
-from engine import ops                              # noqa: E402
-from engine import plan as P                        # noqa: E402
-from engine import presets as PS                    # noqa: E402
-from engine import rules as R                       # noqa: E402
-from engine import template as T                    # noqa: E402
-from engine.context import Item, NameContext        # noqa: E402
-from engine.scan import ScanOptions, nkey, scan     # noqa: E402
+from namecat_py import common as C                      # noqa: E402
+from namecat_py import llm as L                         # noqa: E402
+from namecat_py import ops                              # noqa: E402
+from namecat_py import plan as P                        # noqa: E402
+from namecat_py import presets as PS                    # noqa: E402
+from namecat_py import rules as R                       # noqa: E402
+from namecat_py import template as T                    # noqa: E402
+from namecat_py.context import Item, NameContext        # noqa: E402
+from namecat_py.scan import ScanOptions, nkey, scan     # noqa: E402
 
 PASS = 0
 FAIL = 0
@@ -805,7 +805,7 @@ def test_llm_offline():
     eq(echo.simplify("Screenshot_2023-08-15_at_10.30.45"), "", "全是垃圾词时返回空")
 
     case("H5 回环地址不走系统代理")
-    from engine import provider as PRV
+    from namecat_py import provider as PRV
     check(PRV.opener_for("http://127.0.0.1:11434/v1/models") is PRV._LOOPBACK_OPENER,
           "127.0.0.1 用「无代理」opener")
     check(PRV.opener_for("http://localhost:8080/") is PRV._LOOPBACK_OPENER,

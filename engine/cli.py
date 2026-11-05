@@ -21,12 +21,12 @@ import os
 import sys
 
 from . import APP_NAME, APP_VER, STATUS_TEXT, ST_SKIP
-from . import common as C
-from . import ops
-from . import plan as P
-from . import presets as PS
-from . import rules as R
-from .scan import (KIND_DIR, KIND_FILE, KIND_IMAGE, KIND_VIDEO, SORT_MODES,
+from namecat_py import common as C
+from namecat_py import ops
+from namecat_py import plan as P
+from namecat_py import presets as PS
+from namecat_py import rules as R
+from namecat_py.scan import (KIND_DIR, KIND_FILE, KIND_IMAGE, KIND_VIDEO, SORT_MODES,
                    ScanOptions, scan)
 
 ONLY_CHOICES = {
@@ -286,8 +286,8 @@ def _make_client(args):
     界面里保存过的供应商配置同样生效（界面与命令行共用同一套配置），
     命令行参数优先级最高。
     """
-    from . import llm as L
-    from . import provider as PRV
+    from namecat_py import llm as L
+    from namecat_py import provider as PRV
     cfg = PRV.effective_config()
     prov = (getattr(args, "llm_provider", "") or "").strip()
     if prov:
@@ -303,7 +303,7 @@ def _make_client(args):
 
 def cmd_llm_instruction(args) -> int:
     """`--llm-edit`：把要求文件准备好并打印路径，使用者直接改文本即可。"""
-    from . import llm as L
+    from namecat_py import llm as L
     custom = getattr(args, "llm_instruction", "")
     path = L.ensure_instruction_file(custom)
     print("要求文件：%s" % path)
@@ -330,7 +330,7 @@ def _collect_rules(args, preset=None) -> list:
     # 命令行 --llm-instruction 对 llm 规则生效（规则自己写了要求时以规则为准）
     instr_file = getattr(args, "llm_instruction", "")
     if instr_file:
-        from . import llm as L
+        from namecat_py import llm as L
         body = L.read_instruction(instr_file)
         for r in out:
             if r.kind == "llm" and not str((r.extras or {}).get("instruction") or "").strip():

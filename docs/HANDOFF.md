@@ -1,8 +1,9 @@
 # 交接文档：NameCat 引擎 Rust 化（给下一位 Agent）
 
 > 交接时间：2026-11-05 11:00（P5 完成，工程收尾）
-> 当前阶段：**P0–P5 全部完成**。12/12 引擎模块是 Rust（PyO3）实现，`engine/*.py`
-> 只剩一行 re-export；打包链路已带上引擎扩展并带打包后自检；性能与验收数据在
+> 当前阶段：**P0–P5 + 2.0.1 清理，全部完成**。12/12 引擎模块是 Rust（PyO3）实现，
+> `engine/` 只剩应用层（`__init__` / `cli` / `llm_resolve`），转发壳已删；
+> 打包链路已带上引擎扩展并带打包后自检；性能与验收数据在
 > `docs/TEST_REPORT.md` 第 8 节。
 > 读这一份就够开工；细节再看引用的文档。
 
@@ -323,6 +324,23 @@ keep_ext、端点/请求体/请求头/回复抽取（三协议）；
 10. **`EchoClient.plan` 要按 `dict.fromkeys` 去重**：同名只算一次，否则
     `used` 会虚高（预览提示的"N 项"就不对了）。
 
+### 2.0.1：删掉兼容层（2026-11-05）
+
+`engine/<模块>.py` 那 12 个转发壳已全部删除 —— 它们是迁移期的脚手架，留着只会让人
+以为"引擎有两套接口"。现在 `engine/` 只剩应用层三件：`__init__.py`（应用常量 /
+appdata / 旧目录迁移）、`cli.py`（命令行）、`llm_resolve.py`（LLM 批量桥，被 Rust 的
+plan 回调）。引擎接口就是 `namecat_py.<模块>`，没有第二层。
+
+**如果还要动这块代码，记住三条：**
+
+1. 新增/修改引擎函数 → 直接进 `crates/`，然后 `py -3 rust_build.py`；
+   `verify/rust_check.py` 用迁移前固化的 193 个符号当基准，少一个就红。
+2. Rust 侧**不要**再 `py.import("engine.<模块>")` —— 那些模块已经不存在。
+   只有三个根包调用是合法的：`engine.appdata_dir`、`engine.backup_dir`、
+   `engine.llm_resolve`（都定义在 `engine/__init__.py` 或 `llm_resolve.py`）。
+3. 别把验证脚本的临时目录设在别人也用的地方：`run_tests.py` 曾经把整个
+   `_verify_tmp/` 当沙箱并在结束时删掉，顺手删了放在那里的对拍脚本。
+
 ### P5 已交付（2026-11-05，实测）
 
 | 改动 | 文件 | 内容 |
@@ -330,7 +348,7 @@ keep_ext、端点/请求体/请求头/回复抽取（三协议）；
 | 打包带上引擎 | `build_exe.py` | 三道前置闸（扩展存在且唯一 / ABI 匹配 / 不比源码旧）+ 显式加二进制 + 打包后自检 |
 | exe 瘦身 | `build_exe.py` | 改由脚本生成 `.spec` 过滤 `a.binaries`：41.2 → **29.8 MB**（`--keep-opengl` 可保留软件 OpenGL） |
 | 源码运行提示 | `main.py` | `_engine_hint()`：缺扩展时给一句人话（跑 `rust_build.py`），而不是抛 `No module named 'namecat_py'` |
-| 性能基准 | `_verify_tmp/bench_engine.py` | 新旧引擎同批文件对跑，7 轮取中位数，输出 `bench_result.json` |
+| 性能基准 | `verify/bench.py` | 当前引擎各阶段耗时，7 轮取中位数，附 1.6.3 参考值 |
 | 数据与口径 | `docs/TEST_REPORT.md` 第 8 节 / `README.md` | 性能表、打包链路、"源码运行要先构建引擎" |
 
 **验收命令（按顺序，都不慢）**：
@@ -338,9 +356,10 @@ keep_ext、端点/请求体/请求头/回复抽取（三协议）；
 ```bat
 py -3 rust_build.py                          :: 构建 + 装 .pyd
 python verify/rust_check.py --fail-on-any    :: 符号闸门 12/12
-PYTHONPATH=_vendor python _verify_tmp/p3_equiv.py   :: 行为对拍（287 项）
+PYTHONPATH=_vendor python verify/run_tests.py       :: 410 断言（引擎 + 端到端）
+PYTHONPATH=_vendor python verify/test_edges.py      :: 190 断言（边界与异常路径）
 py -3 build_exe.py --zip                     :: 打包 + 自检 + 出 zip
-PYTHONPATH=_vendor python _verify_tmp/bench_engine.py   :: 性能表
+PYTHONPATH=_vendor python verify/bench.py           :: 性能表
 ```
 
 **P5 必须知道的坑**：
@@ -451,8 +470,8 @@ PYTHONPATH=_vendor python _verify_tmp/bench_engine.py   :: 性能表
 | `tools/gen_zhconv.py` | 简繁表生成/校验（数据源须传换壳前的 zhconv.py） |
 | `tools/gen_path_cases.py` | 路径语义语料采集（`--check` 校验现有 JSON 是否过期） |
 | `engine/llm_resolve.py` | LLM 规则的批量解析桥（`plan` 出现 llm 规则时回调它；留在 Python 是为了不改 `plan` 的调用约定） |
-| `_verify_tmp/p4_equiv.py` | P4 对拍：llm / provider / secrets / presets（1701 项） |
-| `_verify_tmp/bench_engine.py` | 性能基准：新（Rust）vs 旧（Python）引擎同批文件对跑 |
+| `verify/bench.py` | 性能基准：当前引擎各阶段耗时 + 1.6.3 参考值 |
+| `verify/run_tests.py` / `test_edges.py` / `ui_smoke.py` | 三套自检（410 / 190 断言 + 界面全流程） |
 | `_verify_tmp/ref/refengine/` | 换壳前的参考实现（rules/template/zhconv/scan/plan/context/common/ops/llm/provider/secrets/presets） |
 | `verify/rust_check.py` | 符号闸门：按 `engine_symbols.json` 逐模块对比 + 根常量取值 + 子模块可导入 |
 | `verify/engine_symbols.json` | 换壳前固化的期望符号集（12 模块 / 193 个符号），**只读** |
@@ -483,5 +502,7 @@ PYTHONPATH=_vendor python _verify_tmp/bench_engine.py   :: 性能表
 
 **如果还要动这块代码**，先跑这三条（都很快，且互不替代）：
 `python rust_build.py`（构建+装 .pyd）→ `python verify/rust_check.py --fail-on-any`
-（符号闸门，12/12）→ `PYTHONPATH=_vendor python _verify_tmp/p4_equiv.py`（行为对拍）。
+（符号闸门，12/12）→ `py -3 verify/run_tests.py`（410 断言）。
+迁移期的对拍脚本（`p{2,3,4}_equiv.py`）与参考实现已在 2.0.1 清理，需要复核时从
+`v1.6.3` 标签取回 Python 实现重跑。
 **注意：任何"顺手修正"都可能踩到上面那 10 条"照抄"的实现要点，改之前先看对拍。**

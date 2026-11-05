@@ -92,7 +92,7 @@ impl PyOpsResult {
 }
 
 fn plan_options(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    let plan_mod = py.import("engine.plan")?;
+    let plan_mod = py.import("namecat_py.plan")?;
     Ok(plan_mod.getattr("PlanOptions")?.call0()?.unbind())
 }
 
@@ -104,7 +104,7 @@ fn call_build(
     progress: Option<&Bound<'_, PyAny>>,
     client: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let plan_mod = py.import("engine.plan")?;
+    let plan_mod = py.import("namecat_py.plan")?;
     let build = plan_mod.getattr("build")?;
     let none = || py.None();
     let plan = build.call1((
@@ -256,13 +256,13 @@ fn apply(
         let options = opts_obj.call_method0("as_dict")?;
         let rules_json = match rules {
             Some(r) if !r.is_none() => {
-                let rules_mod = py.import("engine.rules")?;
+                let rules_mod = py.import("namecat_py.rules")?;
                 rules_mod.getattr("rules_to_json")?.call1((r,))?
             }
             _ => PyList::empty(py).into_any(),
         };
 
-        let common = py.import("engine.common")?;
+        let common = py.import("namecat_py.common")?;
         let kw = PyDict::new(py);
         kw.set_item("summary", summary)?;
         kw.set_item("options", options)?;
@@ -339,8 +339,8 @@ fn undo(
 #[pyfunction]
 #[pyo3(signature = (plan, path))]
 fn export_csv(py: Python<'_>, plan: &Bound<'_, PyAny>, path: &str) -> PyResult<String> {
-    let kind_text = py.import("engine.scan")?.getattr("KIND_TEXT")?;
-    let status_text = py.import("engine.common")?.getattr("STATUS_TEXT")?;
+    let kind_text = py.import("namecat_py.scan")?.getattr("KIND_TEXT")?;
+    let status_text = py.import("namecat_py.common")?.getattr("STATUS_TEXT")?;
 
     let mut rows: Vec<Vec<String>> = vec![vec![
         "序号".to_string(),
@@ -450,7 +450,7 @@ fn scan_and_plan(
     progress: Option<&Bound<'_, PyAny>>,
     client: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let scan_mod = py.import("engine.scan")?;
+    let scan_mod = py.import("namecat_py.scan")?;
     let opts: Bound<'_, PyAny> = match scan_opts {
         Some(o) if !o.is_none() => o.clone(),
         _ => {
@@ -464,6 +464,16 @@ fn scan_and_plan(
         .call1((opts, progress.map(|p| p.clone().unbind()).unwrap_or_else(|| py.None())))?;
     let items = res.getattr("items")?;
     call_build(py, &items, rules, plan_opts, progress, client)
+}
+
+/// `_common_base(dirs)` —— 多个目录的公共父目录（跨盘时退回第一项）。
+///
+/// 名字带下划线是故意的：它不是给界面用的，而是 `verify/run_tests.py` 里
+/// 直接断言的私有辅助（对应原 Python 实现的同名函数）。留着同名同义，
+/// "跨盘退回首项"这条规则才继续有人盯着。
+#[pyfunction]
+fn _common_base(dirs: Vec<String>) -> String {
+    ops_core::common_base(&dirs)
 }
 
 pub fn attach(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -495,6 +505,7 @@ pub fn attach(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(undo, &m)?)?;
     m.add_function(wrap_pyfunction!(export_csv, &m)?)?;
     m.add_function(wrap_pyfunction!(scan_and_plan, &m)?)?;
+    m.add_function(wrap_pyfunction!(_common_base, &m)?)?;
 
     crate::shim::set_all(
         &m,
