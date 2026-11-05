@@ -1,0 +1,48 @@
+# NameCat Rust 引擎：cargo workspace 根
+#
+# 布局（对应 docs/DESIGN_RUST_ENGINE.md §2.1）：
+#   crates/namecat-core  纯逻辑，零 Python 依赖，cargo test 可独立跑
+#   crates/namecat-py    PyO3 绑定层，只做类型转换 + 异常映射
+#
+# 版本号：与 engine/__init__.py 的 APP_VER 保持一致（rust_build.py 会校验），
+# namecat_py.APP_VER 直接取这里的值，避免两处各写一遍。
+
+[workspace]
+resolver = "3"
+members = ["crates/namecat-core", "crates/namecat-py"]
+
+[workspace.package]
+version = "2.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[workspace.dependencies]
+pyo3 = { version = "0.29.3", features = ["extension-module"] }
+thiserror = "2"
+namecat-core = { path = "crates/namecat-core" }
+# 正则：必须用回溯式引擎。regex crate 没有回引用/环视，用户写的 \1、(?=) 会直接报错
+fancy-regex = "0.20"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+# 文本：Python unicodedata.normalize("NFKD") 与 combining 判定的对应物
+unicode-normalization = "0.1"
+# hash 规则
+md-5 = "0.11"
+sha1 = "0.11"
+sha2 = "0.11"
+crc32fast = "1.5"
+# 规则 id（md5(uuid4) 的 12 位）
+uuid = { version = "1", features = ["v4"] }
+# 本地时间（scan/context 的日期变量要按系统时区，等价 datetime.fromtimestamp）
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Win32：LCMapStringEx（normcase 必须与 ntpath 完全一致，Unicode 简单映射与
+# Rust 的 to_lowercase 不同——İ/ǅ/希腊词尾 sigma 都会差），P4 还要用它做 DPAPI
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Storage_FileSystem", "Win32_System_LibraryLoader", "Win32_Security_Cryptography"] }
+
+# 发布构建（maturin build --release）默认带符号表太重，这里统一压掉
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

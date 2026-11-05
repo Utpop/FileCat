@@ -21,7 +21,7 @@ import shutil
 import sys
 
 APP_NAME = "NameCat"
-APP_VER = "1.6.2"
+APP_VER = "2.0.0"
 LOG_DIR_NAME = "_rename_logs"
 # 撤销日志统一存放的文件夹名（放在**程序目录**下，与被改名的目标目录无关）
 BACKUP_DIR_NAME = "Name_backup"
@@ -161,7 +161,7 @@ STATUS_TEXT = {
     ST_SKIP: "已跳过",
 }
 
-LOG_SCHEMA = 4
+LOG_SCHEMA = 5          # 5 = 增加 exec 段（执行阶段的真实成败，4 及更早只有 summary）
 UNDO_SCHEMA = 3          # 撤销日志格式版本：3 = BatchRenamer 原格式（可读旧日志）
 
 PY_VER = sys.version_info[:2]

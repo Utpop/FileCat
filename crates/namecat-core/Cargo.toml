@@ -1,0 +1,26 @@
+[package]
+name = "namecat-core"
+description = "NameCat 重命名引擎核心（纯 Rust，无 Python 依赖）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+fancy-regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+unicode-normalization.workspace = true
+md-5.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+crc32fast.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

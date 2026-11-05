@@ -396,7 +396,7 @@ KIND_FIELDS: Dict[str, List[Tuple[str, str, str, object]]] = {
                                      ("capitalize", "整个名字首字母大写")])],
     "trim": [("a", "要剥掉的字符集", "line", "留空 = 剥空白，并去掉结尾的点")],
     "collapse": [("a", "要合并的字符", "line", "例如一个空格")],
-    "template": [("a", "模板原文", "template", "点击右侧按钮打开模板编辑器")],
+    "template": [("a", "模板原文", "template", "例如 {n}-{name}；可用 {ext} {date} {parent} 等")],
     "slug": [("a", "分隔符", "line", "默认 _")],
     "translit": [],
     "zhconv": [("a", "转换方向", "combo", [("s2t", "简体 → 繁体"),
@@ -575,7 +575,7 @@ def rule_problems(rule: R.Rule) -> List[str]:
         if not str(value or "").strip():
             probs.append("「%s」不能为空" % label)
 
-    if kind in ("delete", "remove_chars", "keep_after", "prefix", "suffix"):
+    if kind in ("delete", "remove_chars", "prefix", "suffix"):
         need(a, R.RULE_PARAM_HINT.get(kind, {}).get("a", "参数"))
     if kind in ("replace", "regex"):
         need(a, "查找" if kind == "replace" else "正则表达式")
@@ -601,8 +601,6 @@ def rule_problems(rule: R.Rule) -> List[str]:
     if kind == "extension":
         if not a and not b:
             probs.append("要么填新扩展名，要么选一种特殊处理")
-        if a and not a.startswith("."):
-            probs.append("扩展名建议带上点，例如 .md")
     if kind == "llm":
         try:
             int(str(get_field(rule, "extras.max_len") or 24))
@@ -638,9 +636,18 @@ def rule_problems(rule: R.Rule) -> List[str]:
     return probs
 
 
-def rule_warnings(rule: R.Rule) -> List[str]:
-    """不阻断保存、但值得提醒的情况。"""
+def rule_advisories(rule: R.Rule) -> List[str]:
+    """**不阻断**生成预览、但值得提醒的情况（属性面板底部以橙色小字显示）。
+
+    这些都不是错误：`extension` 填 `md` 引擎会自动补点、`keep_after` 留空
+    引擎按长度对半截断。之前它们和真正的"参数缺失"混在 rule_problems 里，
+    结果一条合法的规则被拒绝预览。
+    """
     out: List[str] = []
+    if rule.kind == "keep_after" and not str(rule.a or "").strip():
+        out.append("分隔符留空：会按长度对半截断")
+    if rule.kind == "extension" and rule.a and not rule.a.startswith("."):
+        out.append("会自动补成「.%s」" % rule.a.lstrip("."))
     if rule.kind == "regex" and rule.a:
         try:
             re.compile(rule.a)
@@ -648,10 +655,16 @@ def rule_warnings(rule: R.Rule) -> List[str]:
             return out
         if "\\1" in rule.b or "{1}" in rule.b:
             out.append("替换串引用了第 1 个分组：只有正则里有括号时才有效")
-    if rule.kind == "template" and rule.a and "{ext" not in rule.a \
-            and "{扩展名" not in rule.a:
-        out.append("模板没写扩展名变量：引擎会在末尾自动找回原扩展名")
+    if rule.kind == "template" and rule.a \
+            and "{ext" not in rule.a and "{扩展名" not in rule.a:
+        # 不是错误：引擎只接管主干、扩展名原样保留。写出来是免得用户以为扩展名丢了
+        out.append("没写扩展名变量：会保留原扩展名")
     return out
+
+
+def rule_warnings(rule: R.Rule) -> List[str]:
+    """旧名字（规则提示），等同 `rule_advisories`。"""
+    return rule_advisories(rule)
 
 
 def move_rule(rules: List[R.Rule], src: int, dst: int) -> List[R.Rule]:
@@ -792,6 +805,8 @@ def logs(root: str) -> List[dict]:
                 "root": str(data.get("root") or ""),
                 "count": len(pairs),
                 "summary": data.get("summary") or {},
+                # 执行阶段的真实成败（schema 5 才有；老日志为空 → 界面回落 summary）
+                "exec": data.get("exec") or {},
                 "pairs": pairs,
                 "name": os.path.basename(path),
             })

@@ -1,0 +1,18 @@
+[package]
+name = "namecat-py"
+description = "NameCat 引擎的 PyO3 绑定层（只做类型转换 + 异常映射）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+# 模块名必须与 .pyd 文件名一致，否则 Python 报
+# "dynamic module does not define module export function (PyInit_namecat_py)"
+name = "namecat_py"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+namecat-core.workspace = true
+pyo3.workspace = true
+serde_json.workspace = true

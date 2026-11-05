@@ -515,8 +515,12 @@ class WorkspacePage(QWidget):
                           self.state.only, width=148, height=32)
         self.only.changed.connect(self._on_only)
         row2.addWidget(self.only, 0)
-        row2.addWidget(self._check("包含子文件夹", self.state.recursive, self._on_recursive))
-        row2.addWidget(self._check("包含隐藏项", self.state.include_hidden, self._on_hidden))
+        self.cb_recursive = self._check("包含子文件夹", self.state.recursive,
+                                        self._on_recursive)
+        row2.addWidget(self.cb_recursive)
+        self.cb_hidden = self._check("包含隐藏项", self.state.include_hidden,
+                                     self._on_hidden)
+        row2.addWidget(self.cb_hidden)
 
         adv_holder = Clickable()
         adv = hbox(adv_holder, 0, 4)
@@ -557,6 +561,7 @@ class WorkspacePage(QWidget):
         cb.toggled.connect(slot)
         lay.addWidget(cb, 0, Qt.AlignVCenter)
         lay.addWidget(Label(text, 12, 400, C["t1"]), 0, Qt.AlignVCenter)
+        w._cb = cb          # 套预设时要能把勾选状态同步回来
         return w
 
     # ---------------- 规则区 ----------------
@@ -745,6 +750,8 @@ class WorkspacePage(QWidget):
         lay.addWidget(c_note, 1)
         w.setFixedHeight(34)
         w._cb = cb
+        w._st = c_st          # 勾选状态变了就地改这一格，不整表重建
+        w._item = it
         return w
 
     # ---------------- 摘要 ----------------
@@ -827,6 +834,10 @@ class WorkspacePage(QWidget):
     def _refresh_rules(self):
         if not hasattr(self, "rule_lay"):
             return
+        # 编辑参数会重建整个列表：滚动位置必须自己记住再放回去，
+        # 否则改一条靠后的规则，列表"啪"地跳回顶部。
+        bar = self.rule_scroll.verticalScrollBar()
+        keep_scroll = bar.value()
         self._clear(self.rule_lay)
         self.rule_badge.setText("%d 条" % len(self.rules))
         # 没有规则时容器退回白底：灰底是"这里有内容"的暗示，空盒子别抢戏
@@ -854,7 +865,7 @@ class WorkspacePage(QWidget):
             self.rule_lay.addWidget(row)
         self.rule_lay.addStretch(1)
         fit_scroll_content(self.rule_scroll)
-        self.rule_scroll.verticalScrollBar().setValue(0)
+        bar.setValue(min(keep_scroll, bar.maximum()))
         self._refresh_props()
 
     def _current_rule(self):
@@ -899,7 +910,15 @@ class WorkspacePage(QWidget):
                 control = FieldEdit(str(value), height=30)
                 control.edited.connect(
                     lambda r=rule, k=key, w=control: self._set_field(r, k, w.text()))
-                if opt:
+                if ctl == "template":
+                    # 模板变量的真实清单来自引擎（A.template_variables 用真实
+                    # NameContext 渲染一遍），挂在 tooltip 上，不占版面。
+                    variables = A.template_variables()
+                    control.edit.setToolTip("可用变量（示例值）：\n" + "\n".join(
+                        "%s → %s" % (name, val) for name, val in variables))
+                    control.edit.setPlaceholderText(
+                        opt or "例如 {n}-{name}；可用 {ext} {date} {parent} 等")
+                elif opt:
                     control.edit.setPlaceholderText(str(opt)[:40])
             self.props_lay.addWidget(self._field_row(label, control, grow=True))
 
@@ -909,8 +928,58 @@ class WorkspacePage(QWidget):
             sel.setMinimumWidth(130)
             sel.changed.connect(lambda v, r=rule: self._set_selector(r, v))
             self.props_lay.addWidget(self._field_row("作用范围", sel, grow=True))
+        self._flag_props(rule)
+        self._advisory_label(rule)
         self.props_lay.addStretch(1)
         self._props_fit()
+
+    # ---------------- 通用开关（引擎支持、以前界面没有入口） ----------------
+    def _flag_props(self, rule):
+        """按引擎声明的 KIND_FLAGS 渲染通用开关。
+
+        `skip_ext` / `occurrence` / `keep_sep` 一直是引擎能力，但属性面板只渲染了
+        「作用范围」，于是 README 宣传的「不含扩展名」「第 N 次出现」在界面上
+        根本设不了。这里按同一张表补齐，以后引擎加开关也会自动出现。
+        """
+        flags = A.rule_flags(rule.kind)
+        if "occurrence" in flags and (rule.selector or "text") != "text":
+            occ = FieldEdit(str(rule.occurrence or 1), width=70, height=30)
+            occ.edit.setToolTip("1 = 第一次出现，-1 = 最后一次，N = 第 N 次")
+            occ.edited.connect(lambda r=rule, w=occ: self._set_occurrence(r, w.text()))
+            self.props_lay.addWidget(self._field_row("第几次出现", occ, grow=False))
+        if "skip_ext" in flags:
+            self.props_lay.addWidget(self._flag_row(
+                "不作用于扩展名", bool(rule.skip_ext),
+                lambda on, r=rule: self._set_flag(r, "skip_ext", on)))
+        if "keep_sep" in flags:
+            self.props_lay.addWidget(self._flag_row(
+                "保留分隔符", bool(rule.keep_sep),
+                lambda on, r=rule: self._set_flag(r, "keep_sep", on)))
+
+    def _flag_row(self, text, checked, slot):
+        holder = QWidget()
+        row = hbox(holder, 0, 6)
+        cb = Check(checked)
+        cb.toggled.connect(slot)
+        row.addWidget(cb, 0, Qt.AlignVCenter)
+        row.addWidget(Label(text, 12, 400, C["t1"]), 0, Qt.AlignVCenter)
+        row.addStretch(1)
+        holder.setFixedHeight(24)
+        return self._wrap_row(holder)
+
+    def _advisory_label(self, rule):
+        """把不进 rule_problems 的提醒挂在面板底部（灰色小字，不阻断预览）。
+
+        用中性灰而不是警告橙：这些是"引擎会这样处理"的说明，不是错误。
+        标成橙色会让每一条模板规则都像出了问题。
+        """
+        tips = A.rule_advisories(rule)
+        if not tips:
+            return
+        lab = Label("提示：" + "；".join(tips), 11, 400, C["t2"])
+        lab.setWordWrap(True)
+        self.props_lay.addSpacing(4)
+        self.props_lay.addWidget(lab)
 
     def _props_fit(self):
         """装完再量一次：内容超出卡片就出滚动条，而不是把每一行压扁。
@@ -979,6 +1048,17 @@ class WorkspacePage(QWidget):
             pos.setMinimumWidth(130)
             pos.changed.connect(lambda v, r=rule: self._set_field(r, "c", v))
             self.props_lay.addWidget(self._field_row("位置", pos, grow=True))
+            # 锚点之前/之后必须有个地方填锚点：引擎读的是 rule.charset，
+            # 面板以前不渲染它，于是这两个选项选了等于没选（静默退回前缀）。
+            if (A.get_field(rule, "c") or "prefix").lower() in ("before", "after"):
+                anchor = FieldEdit(rule.charset or "", height=30)
+                anchor.edit.setPlaceholderText("用哪个字符定位编号")
+                anchor.edited.connect(
+                    lambda r=rule, w=anchor: self._set_field(r, "charset", w.text()))
+                self.props_lay.addWidget(self._field_row("锚点字符", anchor, grow=True))
+
+        self._flag_props(rule)
+        self._advisory_label(rule)
 
         tip = Label("号码按扫描顺序发号；整个名字换成序号，扩展名原样保留。"
                     if rule.kind == "renumber" else
@@ -1358,6 +1438,27 @@ class WorkspacePage(QWidget):
         self._refresh_rules()
         self._mark_stale()
 
+    def _set_flag(self, rule, key, on):
+        if bool(getattr(rule, key, False)) == bool(on):
+            return
+        setattr(rule, key, bool(on))
+        self._refresh_rules()
+        self._mark_stale()
+
+    def _set_occurrence(self, rule, text):
+        """第几次出现：空/0 按首次处理，-1 表示最后一次。"""
+        try:
+            n = int(str(text).strip() or 1)
+        except (TypeError, ValueError):
+            return
+        if n == 0:
+            n = 1
+        if n == int(rule.occurrence or 1):
+            return
+        rule.occurrence = n
+        self._refresh_rules()
+        self._mark_stale()
+
     # ================= 扫描参数 =================
     def _on_root_changed(self):
         root = self.path.text()
@@ -1566,7 +1667,24 @@ class WorkspacePage(QWidget):
         A.set_excluded(self.bundle.plan, excluded)
         n = len(self.bundle.plan.items)
         self.preview_hint.setText("%d 项 · 已勾选 %d 项" % (n, n - len(excluded)))
+        for w in self._row_widgets():
+            self._paint_row(w)
         self._refresh_summary()
+
+    def _paint_row(self, w):
+        """按条目的真实状态重画这一行的状态格。
+
+        以前取消勾选只改了引擎里的 status，行文字还写着「待重命名」，
+        而底部的「已跳过」胶囊已经 +1 —— 同一屏里两个数对不上。
+        """
+        lab = getattr(w, "_st", None)
+        it = getattr(w, "_item", None)
+        if lab is None or it is None:
+            return
+        st = getattr(it, "status", "ok")
+        lab.setText(A.status_text(st))
+        lab.setStyleSheet("color:%s;background:transparent;"
+                          % STATUS_TONE.get(st, C["t2"]))
 
     def _check_all(self, on):
         for w in self._row_widgets():
@@ -1664,6 +1782,15 @@ class WorkspacePage(QWidget):
         self.bundle = None
         self.path.setText(self.state.root)
         self.only.set_value(self.state.only)
+        # 工具栏的两个勾选框也要跟着预设走，否则界面显示的扫描范围与
+        # state 里的实际值不一致（预设 recursive=true 时框还是空的）。
+        for holder, on in ((getattr(self, "cb_recursive", None), self.state.recursive),
+                           (getattr(self, "cb_hidden", None), self.state.include_hidden)):
+            if holder is None or not hasattr(holder, "_cb"):
+                continue
+            holder._cb.blockSignals(True)
+            holder._cb.setChecked(bool(on))
+            holder._cb.blockSignals(False)
         self._refresh_all()
         self.status_message.emit("已应用预设：%s" % preset.name)
         # 目录还在就直接按新预设重扫一遍，省掉"再点一次扫描"这一步

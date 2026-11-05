@@ -42,8 +42,36 @@ def _wants_gui(argv) -> bool:
     return len(argv) == 1 and argv[0].lower() in GUI_FLAGS
 
 
+def _engine_hint() -> str:
+    """引擎扩展是否就位；缺了返回一句人话，就位返回空串。
+
+    `engine/*.py` 现在只是一行 `from namecat_py.xxx import *`，真正的实现是
+    `_vendor/namecat_py.cpXXX-win_amd64.pyd`。直接 clone 下来不构建就运行，
+    报的是一句 `No module named 'namecat_py'` —— 对着这句话没人猜得到该干什么，
+    所以在入口拦一下。
+    """
+    try:
+        import namecat_py  # noqa: F401
+    except ImportError as exc:
+        return (
+            "引擎扩展没加载：%s\n"
+            "\n"
+            "NameCat 的引擎（engine/）已经是 Rust 实现，源码运行前要先构建一次：\n"
+            "    py -3 rust_build.py\n"
+            "\n"
+            "需要 Rust 工具链与 maturin；构建产物装到 _vendor/namecat_py.*.pyd。\n"
+            "不想装 Rust 就直接用 Releases 里的 NameCat.exe（已内含引擎）。"
+            % exc
+        )
+    return ""
+
+
 def main(argv=None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    hint = _engine_hint()
+    if hint:
+        print(hint, file=sys.stderr)
+        return 1
     if _wants_gui(args):
         from ui.app import run
         return run([])

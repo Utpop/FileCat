@@ -425,3 +425,109 @@ python verify\test_edges.py -v     :: 逐条打印
 4. **B5/B6（撤销日志）**、**B7/B8/B9（日志与 CLI 容错）** —— 一组，都是"异常输入 → 堆栈/静默失败"。
 5. **P2-1/P2-3（参数规整与上限）**、**P2-4/P2-5（归一化容错）**。
 6. **P3 组**：测试隔离（P3-1/P3-2）建议同步做，否则自检的红绿不反映代码质量。
+
+---
+
+## 8. Rust 引擎迁移（1.6.3）—— 性能与打包验收
+
+引擎 12 个模块全部由 Python 改写为 Rust（`crates/namecat-core` + PyO3 绑定
+`crates/namecat-py`），`engine/*.py` 只剩一行 re-export。**行为等价性**由三份
+逐字段对拍脚本把关（`_verify_tmp/p{2,3,4}_equiv.py`，合计 3170 项 0 差异），
+本节只记**性能**与**发布链路**。
+
+### 8.1 基准（2000 个文件，同一规则链，新旧对跑）
+
+`PYTHONPATH=_vendor py -3 _verify_tmp/bench_engine.py`
+
+同一批文件、同一条规则链（`replace` + `remove_chars` + 三位 `number`）、
+同一个调用姿势，一边是 Rust 引擎，一边是 `_verify_tmp/ref/refengine/` 里
+换壳前的 Python 实现。每个阶段 7 轮取中位数（前置 1 轮预热）。
+
+| 阶段 | Python 引擎 | Rust 引擎 | 倍率 |
+|---|---|---|---|
+| 扫描（2005 项，含递归） | 50.2 ms | **30.5 ms** | **1.65×** |
+| 纯算名（跑完整条规则链） | 27.1 ms | **22.4 ms** | **1.21×** |
+| 算名 + 两遍校验 | 80.1 ms | 83.0 ms | 0.96×（持平） |
+| 扫描 + 算名（`scan_and_plan`） | 136.9 ms | **116.1 ms** | **1.18×** |
+| 落盘 2005 项 | 611 ms | 621 ms | 0.98×（持平） |
+| 撤销 2005 项 | 1133 ms | 1232 ms | 0.92×（持平） |
+
+怎么读这张表：
+
+- **扫描是唯一显著的收益（1.65×）**：Python 版每个条目要走 `os.stat` +
+  `os.scandir` 两套对象，Rust 版直接 `GetFileInformationByName`（Win11）/
+  `GetFileAttributesExW` 三级回退，且排序键预计算。
+- **算名 1.21×**：规则链本身是字符串处理，Rust 快，但每项要跨一次 PyO3
+  边界读 `name/new_name`，边界成本吃掉了一部分。
+- **校验段持平（0.96×）**：这一段不是 CPU 密集，而是**每个目标名探一次盘**
+  （2005 次 `path_exists`）+ 每次比较跑一遍 `LCMapStringEx` 规范化。
+  为了跟 Python 的 `str.lower()` 完全同解（`İ`/`ǅ`/`Σ` 这些大小写特例），
+  `normcase` 只能用 `LCMapStringEx`，单次约 3.6 µs，比 C 里的 `.lower()` 贵。
+  已经做过一次优化：源路径的 `nkey` 在建 `owner` 表时顺带存下，不再每项重算
+  （98 ms → 90 ms → 稳定后 83 ms）。剩下 3 ms 属噪声与 syscall 差异。
+- **落盘/撤销持平**：纯 I/O，本机 Windows Defender 实时扫描主导，两者都
+  约 0.3 ms/文件；Rust 侧用的是 `MoveFileExW(flags=0)`（不覆盖目标），
+  与 `os.rename` 语义一致。撤销的抖动在 ±10% 上下，与实现无关。
+
+**结论**：这次重写的目的不是提速（引擎本来就不是瓶颈），收益集中在扫描；
+其余阶段与 Python 版持平。真正拿到的是**单一实现**：界面与命令行共用同一份
+逻辑，不再有"两套代码各自演化"的风险。
+
+### 8.2 打包链路（P5）
+
+Rust 化之后的第一个发布陷阱：`engine/*.py` 里全是
+`from namecat_py.xxx import *`，**引擎不在包里 = 双击没反应**（窗口程序没有
+控制台，`ImportError` 只会弹一个框，进程卡住）。实测确认过这个问题真实存在：
+只靠 `--paths _vendor` 时，PyInstaller 的所有 TOC 里 `namecat_py` 命中数为 **0**。
+
+`build_exe.py` 现在有四道闸：
+
+| 闸 | 检查 | 失败时 |
+|---|---|---|
+| 1 | `_vendor/namecat_py*.pyd` 存在且唯一 | 直接退出，提示 `py -3 rust_build.py` |
+| 2 | 扩展 ABI 与打包解释器一致（`cp315` vs 3.15） | 直接退出（编译期不报，运行期必崩） |
+| 3 | `.pyd` 不比 `crates/**/*.rs` 旧 | 直接退出（`--allow-stale-engine` 可压掉） |
+| 4 | `--add-binary <pyd>:.` 显式把扩展塞进包 | —— |
+| 5 | 打包后自检：沙箱里 `rename → undo` 往返 | 报错退出 |
+
+自检为什么看文件效果而不是 stdout：窗口程序默认没有控制台，`print` 被
+`engine/cli.py` 的流包装器丢掉，看输出永远是"什么都没发生"。另外自检把
+`TEMP`/`TMP` 也指进沙箱 —— 单文件 exe 启动时要往 `%TEMP%` 解包自身，
+系统 Temp 不可写时会弹 `Could not create temporary directory!` 然后卡住，
+这一条在沙箱环境里第一次跑就踩到了（表现为自检 60 秒超时）。
+
+### 8.2.1 exe 瘦身（41.2 MB → 29.8 MB）
+
+PyInstaller 命令行没有"排除某个二进制"的开关，只有 `--exclude-module`（管 Python
+模块）。所以 `build_exe.py` 改成**自己生成 `.spec`** 再构建，在 spec 里过滤
+`a.binaries`（spec 是构建产物，路径随机器变，不入库）。
+
+剔除清单（`build_exe.py` 的 `DROP_BINARIES`，每条都写了理由）：
+
+| 条目 | 压缩后 | 为什么能删 |
+|---|---|---|
+| `opengl32sw.dll` | 7.5 MB | Qt 的软件 OpenGL 兜底。QWidget 走 raster 绘制，不用 OpenGL；只有显卡驱动缺失的老机器才可能需要（`--keep-opengl` 可保留） |
+| `QtNetwork.pyd` + `Qt6Network.dll` + 3 个 TLS 插件 + networkinformation | 1.4 MB | 程序里所有联网都走 Python 的 urllib，没有一处用 `QNetworkAccessManager` |
+| `qdirect2d` / `qminimal` / `qoffscreen` 平台插件 | 0.5 MB | 真正需要的只有 `platforms\qwindows.dll` |
+| `qtuiotouchplugin` | 46 KB | 桌面鼠标操作不用触摸板手势 |
+| `qtiff` / `qicns` / `qtga` / `qwbmp` 图片格式 | 0.2 MB | PNG/BMP 由 Qt 内建；JPG/SVG/ICO/GIF/WEBP 保留 |
+
+结果：**41.2 MB → 29.8 MB**（zip 40.9 → 29.6 MB），包内二进制 60 → 41 个。
+`libssl`/`libcrypto`（Python urllib 发 HTTPS 要用）与引擎 `.pyd` 都保留。
+
+删完必须验两件事，否则是"能打包、不能跑"：
+1. **窗口真能渲染**（`opengl32sw` 没了）：拿 `user32.FindWindowW` 查窗口句柄 +
+   `GetWindowRect` 读几何，实测 1454×938、可见、响应正常；
+2. **改名 → 撤销**仍走通（打包后自检里已含这一条）。
+
+### 8.3 本轮实际验收
+
+| 项 | 结果 |
+|---|---|
+| `cargo test -p namecat-core` | 112 项通过 |
+| 符号闸门 `verify/rust_check.py --fail-on-any` | 12/12 模块，根常量一致 |
+| 对拍 `p2` / `p3` / `p4` | 1182 + 287 + 1701 项，0 差异 |
+| 打包 `py -3 build_exe.py --zip` | exe **29.8 MB** + zip 29.6 MB（瘦身前 41.2 / 40.9），含引擎扩展 |
+| 打包后自检（改名 → 撤销） | 通过 |
+| exe 图形界面启动 | 窗口标题 `NameCat 1.6.3`，响应正常 |
+| exe 命令行 `rename … --apply` | 2 项改名成功，撤销日志正常写入 |

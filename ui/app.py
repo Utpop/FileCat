@@ -39,7 +39,7 @@ def _fatal(message: str) -> None:
         pass
     head = "NameCat 启动失败。"
     tail = ("\n\n详细信息已写入：\n%s\n\n"
-            "常见原因：依赖目录 _vendor 缺失、Python 版本不受支持（需要 3.12+），"
+            "常见原因：依赖目录 _vendor 缺失、Python 版本不受支持（需要 3.10+），"
             "或解释器里没有装 PySide6。" % log_path) if log_path else ""
     try:
         import ctypes

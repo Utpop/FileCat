@@ -37,7 +37,8 @@ class HistoryPage(QWidget):
             "执行记录", "撤销日志统一存在程序的 Name_backup 文件夹里；撤销只在日志仍存在时可用",
             [refresh, open_btn]))
 
-        self.notice = NoticeBar("日志按目录存放；先在「重命名工作台」选一个目录")
+        self.notice = NoticeBar("撤销日志统一存放在程序的 Name_backup 目录；"
+                                "执行过一次重命名后这里就会有记录")
         outer.addWidget(self.notice)
 
         bar = QFrame()
@@ -227,6 +228,15 @@ class HistoryPage(QWidget):
 
     @staticmethod
     def _result(row):
+        # 优先显示**执行阶段**的真实成败（schema 5 起写进日志的 exec 段）；
+        # 老日志没有这一段，才回落到校验阶段的 summary —— 后者按计划计数，
+        # 部分失败时会显示"成功 N"，与实际不符。
+        ex = row.get("exec") or {}
+        if isinstance(ex, dict) and ("done" in ex or "failed" in ex):
+            done = int(ex.get("done") or 0)
+            failed = int(ex.get("failed") or 0)
+            text = "成功 %d · 失败 %d" % (done, failed) if failed else "成功 %d" % done
+            return Label(text, 12, 500, C["err"] if failed else C["ok"])
         summary = row.get("summary") or {}
         parts = []
         tone = C["t2"]

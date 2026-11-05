@@ -1,0 +1,20 @@
+[build-system]
+requires = ["maturin>=1.16,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "namecat_py"
+description = "NameCat 引擎的 PyO3 绑定层"
+requires-python = ">=3.13"
+dynamic = ["version"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[tool.maturin]
+# 产物就是顶层扩展模块 namecat_py（没有同名的 Python 包），
+# 子模块 rules/plan/... 在 Rust 侧注册进 sys.modules，见 src/lib.rs。
+module-name = "namecat_py"
+# 只要扩展模块本身，不生成 .pyi（后续需要时再加）
+strip = true
