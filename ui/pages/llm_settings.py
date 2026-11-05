@@ -480,7 +480,15 @@ class LlmPage(QWidget):
         self._set_model_options(cfg)
         self._refresh_dirty()
 
-        path = A.llm_instruction_path()
+        # 首次运行就把默认要求**落到文件里**：README 与使用说明都让用户
+        # "直接编辑 %APPDATA%\NameCat\llm_instruction.txt"，可过去只有点过
+        # 「保存要求」才会创建这个文件 —— 全新安装的人照着文档去找，文件根本
+        # 不存在，界面上看着像"没有默认提示词"。ensure 只在缺失时写，
+        # 用户改过的内容不会被动。
+        try:
+            path = A.llm_ensure_instruction()
+        except OSError:                    # 目录不可写：退化成只显示路径
+            path = A.llm_instruction_path()
         self.req_path.setText(path)
         self.req_path.setToolTip(path)
         if read_instruction:

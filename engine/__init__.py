@@ -21,7 +21,7 @@ import shutil
 import sys
 
 APP_NAME = "NameCat"
-APP_VER = "2.0.1"
+APP_VER = "2.0.2"
 LOG_DIR_NAME = "_rename_logs"
 # 撤销日志统一存放的文件夹名（放在**程序目录**下，与被改名的目标目录无关）
 BACKUP_DIR_NAME = "Name_backup"
