@@ -103,6 +103,21 @@ def advanced():
 
 step("AdvancedDialog 构造/应用", advanced)
 
+print("== 4b. 预览卡表头的排序方式下拉 ==")
+
+
+def sort_combo():
+    # 排序方式从高级筛选挪到预览卡表头：换档写回 state 并触发重扫
+    assert hasattr(ws, "sort"), "预览卡表头应有排序下拉"
+    before = ws.state.sort_mode
+    ws._on_sort_changed("mtime_asc")
+    assert ws.state.sort_mode == "mtime_asc", ws.state.sort_mode
+    ws._on_sort_changed(before)     # 还原
+    assert ws.state.sort_mode == before
+
+
+step("排序方式下拉（预览卡表头）", sort_combo)
+
 print("== 5. 编号规则：发号 + 插号同一条 ==")
 
 

@@ -305,7 +305,7 @@ class RulePicker(QDialog):
 
 
 class AdvancedDialog(QDialog):
-    """高级筛选：名称 / 扩展名 / 排序 / 深度 / 文件头校验。"""
+    """高级筛选：名称 / 扩展名 / 深度 / 文件头校验（排序方式在预览卡表头）。"""
 
     def __init__(self, state: A.FormState, parent=None):
         super().__init__(parent)
@@ -331,14 +331,6 @@ class AdvancedDialog(QDialog):
         self.exclude_match = line("名称排除", state.exclude_match)
         self.include_exts = line("仅这些扩展名", state.include_exts, "逗号分隔，例如 jpg, png")
         self.exclude_exts = line("排除扩展名", state.exclude_exts)
-
-        row = hbox(None, 0, 10)
-        lb = Label("排序方式", 12, 400, C["t2"])
-        lb.setFixedWidth(96)
-        row.addWidget(lb, 0, Qt.AlignVCenter)
-        self.sort = Combo(A.sort_modes(), state.sort_mode, width=220, height=32)
-        row.addWidget(self.sort, 0)
-        root.addLayout(row)
 
         row2 = hbox(None, 0, 10)
         lb2 = Label("递归深度", 12, 400, C["t2"])
@@ -386,7 +378,6 @@ class AdvancedDialog(QDialog):
         s.exclude_match = self.exclude_match.text().strip()
         s.include_exts = self.include_exts.text().strip()
         s.exclude_exts = self.exclude_exts.text().strip()
-        s.sort_mode = self.sort.value() or "name_asc"
         try:
             s.max_depth = max(1, min(int(self.depth.text() or 12), A.max_depth()))
         except ValueError:
@@ -635,6 +626,14 @@ class WorkspacePage(QWidget):
         self.preview_hint = Elided("", 11, 400, C["t2"])   # 未扫描时留空，别和拖放区重复
         self.preview_hint.setMinimumWidth(120)
         head.addWidget(self.preview_hint, 1)
+        # 排序方式放在表头正中（发号顺序 = 扫描排序结果，值得常驻可见）：
+        # 换档立即重扫，省得再开高级筛选。
+        self.sort_lb = Label("排序方式", 11, 400, C["t2"])
+        head.addWidget(self.sort_lb, 0, Qt.AlignVCenter)
+        self.sort = Combo(A.sort_modes(), self.state.sort_mode, width=200, height=26)
+        self.sort.changed.connect(self._on_sort_changed)
+        head.addWidget(self.sort, 0, Qt.AlignVCenter)
+        head.addSpacing(8)
         self.btn_all = Button("全选", "check_square", "sm_soft", icon_px=12)
         self.btn_all.clicked.connect(lambda: self._check_all(True))
         self.btn_none = Button("全不选", "square", "sm_soft", icon_px=12)
@@ -1485,6 +1484,15 @@ class WorkspacePage(QWidget):
         self.state.include_hidden = bool(value)
         self._mark_stale()
 
+    def _on_sort_changed(self, value):
+        """排序方式决定发号顺序（先排序再编号）：换档立即重扫。"""
+        if value == self.state.sort_mode:
+            return
+        self.state.sort_mode = value
+        self._mark_stale()
+        if self.bundle is not None and self.bundle.has_scan:
+            self.scan(plan_after=True)
+
     def _pick(self):
         """「选择目录…」只选文件夹，选到的就是扫描根目录（扫里面全部）。
 
@@ -1782,6 +1790,7 @@ class WorkspacePage(QWidget):
         self.bundle = None
         self.path.setText(self.state.root)
         self.only.set_value(self.state.only)
+        self.sort.set_value(self.state.sort_mode)
         # 工具栏的两个勾选框也要跟着预设走，否则界面显示的扫描范围与
         # state 里的实际值不一致（预设 recursive=true 时框还是空的）。
         for holder, on in ((getattr(self, "cb_recursive", None), self.state.recursive),
@@ -1791,6 +1800,9 @@ class WorkspacePage(QWidget):
             holder._cb.blockSignals(True)
             holder._cb.setChecked(bool(on))
             holder._cb.blockSignals(False)
+        self.sort.blockSignals(True)
+        self.sort.set_value(self.state.sort_mode)
+        self.sort.blockSignals(False)
         self._refresh_all()
         self.status_message.emit("已应用预设：%s" % preset.name)
         # 目录还在就直接按新预设重扫一遍，省掉"再点一次扫描"这一步
