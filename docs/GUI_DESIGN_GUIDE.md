@@ -579,7 +579,7 @@ NameCatWindow (QMainWindow)
 | | `only_match` / `exclude_match` | str | `""` | 名称包含 / 排除 |
 | | `include_exts` / `exclude_exts` | str | `""` | 逗号串，`jpg, .png` |
 | | `verify_content` | bool | False | 魔数校验 |
-| | `sort_mode` | str | `name_asc` | 10 档 |
+| | `sort_mode` | str | `path_asc` | 10 档 |
 | | `max_depth` | int | 12 | 1–12 夹紧 |
 | | `selected` | tuple[str] | `()` | 「扫描对象」绝对路径 |
 | 计划 | `start` / `step` / `width` | int | 1 / 1 / 0 | 编号（链里有 `number` 规则时被规则覆盖） |

@@ -114,7 +114,7 @@ impl PyScanOptions {
             verify_content: bool_arg(verify_content, false),
             sort_mode: {
                 let s = text_arg(sort_mode);
-                if s.is_empty() { "name_asc".to_string() } else { s }
+                if s.is_empty() { "path_asc".to_string() } else { s }
             },
             max_depth: coerce_i64(max_depth).unwrap_or(core::MAX_DEPTH),
             follow_log_dirs: bool_arg(follow_log_dirs, false),

@@ -96,7 +96,7 @@ class FormState:
     include_exts: str = ""
     exclude_exts: str = ""
     verify_content: bool = False
-    sort_mode: str = "name_asc"
+    sort_mode: str = "path_asc"
     max_depth: int = MAX_DEPTH
     # 「扫描对象…」直接指定的条目（绝对路径）。空 = 扫整个 root。
     # 对应引擎 ScanOptions.selected，界面不自作过滤。
@@ -124,7 +124,7 @@ class FormState:
             include_exts=_split_ext_list(self.include_exts),
             exclude_exts=_split_ext_list(self.exclude_exts),
             verify_content=bool(self.verify_content),
-            sort_mode=self.sort_mode or "name_asc",
+            sort_mode=self.sort_mode or "path_asc",
             max_depth=max(1, min(int(self.max_depth or MAX_DEPTH), MAX_DEPTH)),
             selected=(set(nkey(p) for p in self.selected) if self.selected else None),
             strict_selected=bool(self.strict_selected and self.selected),
@@ -322,6 +322,31 @@ def set_excluded(plan, excluded_keys) -> int:
 
 def is_excluded(it) -> bool:
     return bool(it.__dict__.get("_excluded"))
+
+
+def set_excluded_one(it, excluded: bool) -> bool:
+    """只改**一个**条目的勾选排除状态，返回是否真的变了。
+
+    9000 个条目时，逐行勾选如果每点一次都跑一遍 `set_excluded`（O(n) 全表遍历）
+    就会卡 20ms；单行点击只碰这一条，成本是常数。语义与 `set_excluded` 完全一致
+    （状态与备注都按同一套存/还），别在这里另造一套。
+    """
+    if it is None:
+        return False
+    excluded = bool(excluded)
+    if it.__dict__.get("_excluded", False) == excluded:
+        return False
+    if excluded:
+        it.__dict__["_excluded"] = True
+        it.__dict__["_status_before"] = it.status
+        it.__dict__["_note_before"] = it.note
+        it.status = ST_SKIP
+        it.note = "按勾选排除"
+    else:
+        it.__dict__.pop("_excluded", False)
+        it.status = it.__dict__.pop("_status_before", it.status)
+        it.note = it.__dict__.pop("_note_before", "")
+    return True
 
 
 def clear_exclusions(items) -> None:

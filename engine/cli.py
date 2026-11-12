@@ -167,7 +167,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--exclude-match", default=None, help="名字含该文本就跳过")
         sp.add_argument("--sort", default=None,
                         choices=[k for k, _t in SORT_MODES],
-                        help="排序方式（默认 name_asc，预设可改）")
+                        help="排序方式（默认 path_asc，预设可改）")
         sp.add_argument("--verify", action="store_true", default=None,
                         help="校验文件头（图片视频）")
         if allow_apply:

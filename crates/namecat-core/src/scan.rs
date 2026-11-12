@@ -552,6 +552,64 @@ pub fn under(path_key: &str, base_key: &str) -> bool {
         && (path_key == base_key || path_key.starts_with(&format!("{base_key}\\")))
 }
 
+/// `key` 的某个祖先目录是否在 `keys` 里（逐步上溯，每层一次哈希查找）。
+///
+/// 这是 `selected` 语义的"条目属于某个被选中的子树"判定。以前是拿整个选中
+/// 集合逐个 `under()` 比较（O(n)），拖进上万个文件时扫描会退化成二次复杂度。
+fn ancestor_in(key: &str, keys: &HashSet<String>) -> bool {
+    let mut parent = pathops::dirname(key);
+    while !parent.is_empty() {
+        if keys.contains(&parent) {
+            return true;
+        }
+        let nxt = pathops::dirname(&parent);
+        if nxt == parent {
+            return false;
+        }
+        parent = nxt;
+    }
+    false
+}
+
+/// 子条目的路径键：父目录键 + 名字（名字同样小写）。
+///
+/// 不能直接对每个条目调 `nkey()` —— 它内部走 `abspath`（GetFullPathNameW），
+/// 9000 个条目要 100ms；而父目录键已经是归一化过的绝对路径，拼一下就够了。
+fn child_key(dir_key: &str, name: &str) -> String {
+    let low = pathops::normcase(name);
+    if dir_key.is_empty() {
+        return low;
+    }
+    let mut out = String::with_capacity(dir_key.len() + low.len() + 1);
+    out.push_str(dir_key);
+    if !dir_key.ends_with('\\') && !dir_key.ends_with('/') {
+        out.push('\\');
+    }
+    out.push_str(&low);
+    out
+}
+
+/// 选中集合里所有目录项的祖先前缀集（含选中项自身所在目录的上层）。
+///
+/// 用来在 `walk_dir` 里 O(1) 回答"这个目录下面还有没有选中项"。
+fn selected_ancestors(keys: &HashSet<String>) -> HashSet<String> {
+    let mut set: HashSet<String> = HashSet::with_capacity(keys.len() * 2);
+    for k in keys {
+        let mut cur = pathops::dirname(k);
+        while !cur.is_empty() {
+            if !set.insert(cur.clone()) {
+                break;      // 上层已插入过，再往上必然也插过了
+            }
+            let nxt = pathops::dirname(&cur);
+            if nxt == cur {
+                break;
+            }
+            cur = nxt;
+        }
+    }
+    set
+}
+
 /// 路径归一化键：Windows 大小写不敏感。
 pub fn nkey(path: &str) -> String {
     pathops::normcase(&pathops::abspath(path))
@@ -658,7 +716,7 @@ impl Default for ScanOptions {
             include_exts: None,
             exclude_exts: None,
             verify_content: false,
-            sort_mode: "name_asc".to_string(),
+            sort_mode: "path_asc".to_string(),
             max_depth: MAX_DEPTH,
             follow_log_dirs: false,
             selected: None,
@@ -856,52 +914,63 @@ pub fn scan(opts: &ScanOptions, progress: &mut dyn FnMut(&str)) -> ScanResult {
         fn walk_dir(
             &mut self,
             dir_path: &str,
+            dir_key: &str,
             depth: i64,
             deep: bool,
             selected: &Option<HashSet<String>>,
             mixed_scope: bool,
             root_key: &str,
+            ancestors: Option<&HashSet<String>>,
         ) {
             let Ok(entries) = fs::read_dir(dir_path) else {
                 return;
             };
             let entries: Vec<fs::DirEntry> = entries.filter_map(|e| e.ok()).collect();
             (self.progress)(dir_path);
-            let mut dirs_kept: Vec<(String, String)> = Vec::new();
+            let mut dirs_kept: Vec<(String, String, String)> = Vec::new();
             for ent in &entries {
                 // is_dir(follow_symlinks=False)：符号链接到目录不算目录
                 let Ok(ft) = ent.file_type() else { continue };
                 let is_dir = ft.is_dir();
                 let name = ent.file_name().to_string_lossy().into_owned();
                 let path = ent.path().to_string_lossy().into_owned();
+                // 键由「父目录键 + 名」直接拼出来，不再对每个条目跑一次
+                // nkey()（abspath 会走 GetFullPathNameW：9000 个条目要 100ms）
+                let key = child_key(dir_key, &name);
                 if is_dir {
                     let low = name.to_lowercase();
                     if self.log_skip.contains(&low) && !self.opts.follow_log_dirs {
                         continue;
                     }
-                    dirs_kept.push((path.clone(), name.clone()));
+                    dirs_kept.push((path.clone(), name.clone(), key.clone()));
                 }
-                // take 内部还会按 selected 过滤；这里把判定挪到调用方，便于复用
-                self.take_selected(path, name, is_dir, selected, mixed_scope, root_key);
+                self.take_selected(path, key, name, is_dir, selected, deep,
+                                   mixed_scope, root_key);
             }
             dirs_kept.sort_by(|a, b| natural_key(&a.1).cmp(&natural_key(&b.1)));
             let recursive_ok = self.opts.recursive;
             let max_depth = self.opts.max_depth;
-            for (child_path, _name) in dirs_kept {
-                let child_key = nkey(&child_path);
-                let sel_tree = match selected {
-                    Some(keys) => keys.iter().any(|k| *k == child_key || under(&child_key, k)),
-                    None => false,
+            // 选中集合的**祖先目录集**（scan() 里算一次，这里只读）：
+            // 「这个目录下面还有没有选中项」= child_key 在祖先集里，O(1)。
+            // 旧写法拿 9000 个选中键逐个 under()，是「目录数 × 选中数」的
+            // 二次复杂度：拖进一个上万文件的目录时实测 680ms。
+            let ancestors = ancestors;
+            for (child_path, _name, child_key) in dirs_kept {
+                let (sel_tree, sel_below) = match (selected, ancestors) {
+                    (Some(keys), Some(anc)) => {
+                        // sel_tree：自己就是选中项，或自己落在某个选中目录之下
+                        //（= 某个祖先在选中集合里，按路径深度查几次哈希即可）
+                        let selected_self = keys.contains(&child_key);
+                        let under_selected_dir =
+                            ancestor_in(&child_key, keys);
+                        (selected_self || under_selected_dir, anc.contains(&child_key))
+                    }
+                    _ => (false, false),
                 };
                 let child_deep = deep || sel_tree;
-                let sel_below = match selected {
-                    Some(keys) => keys
-                        .iter()
-                        .any(|k| *k != child_key && under(k, &child_key)),
-                    None => false,
-                };
                 if (recursive_ok && depth < max_depth) || child_deep || sel_below {
-                    self.walk_dir(&child_path, depth + 1, child_deep, selected, mixed_scope, root_key);
+                    self.walk_dir(&child_path, &child_key, depth + 1, child_deep,
+                                  selected, mixed_scope, root_key, ancestors);
                 }
             }
         }
@@ -909,38 +978,33 @@ pub fn scan(opts: &ScanOptions, progress: &mut dyn FnMut(&str)) -> ScanResult {
         fn take_selected(
             &mut self,
             path: String,
+            key: String,
             name: String,
             is_dir: bool,
             selected: &Option<HashSet<String>>,
+            deep: bool,
             mixed_scope: bool,
             root_key: &str,
         ) {
+            // 已经身处"选中的子树 / 起点"内部时，里面的一切都是要的 ——
+            // 不必再按 selected 过滤一遍。旧写法在这里对每个条目都做一次
+            // nkey()+上溯（选中项命中时还要 Path::is_dir() 再 stat 一次），
+            // 拖进上万个文件时就是纯粹的浪费：实测 9000 个文件 733ms，
+            // 而同样的目录整扫只要 133ms。
             if let Some(keys) = selected {
-                let ok = {
-                    let key = nkey(&path);
-                    if keys.contains(&key) {
-                        !Path::new(&key).is_dir()
+                if !deep {
+                    // 语义：选中的文件 = 就要它；选中的目录 = 要它里面的内容
+                    // （目录自身不算），子树由 deep 覆盖。is_dir 是现成的，别再 stat。
+                    let ok = if keys.contains(&key) {
+                        !is_dir
                     } else {
-                        let mut parent = pathops::dirname(&key);
-                        let mut found = false;
-                        while !parent.is_empty() {
-                            if keys.contains(&parent) {
-                                found = true;
-                                break;
-                            }
-                            let nxt = pathops::dirname(&parent);
-                            if nxt == parent {
-                                break;
-                            }
-                            parent = nxt;
+                        ancestor_in(&key, keys)
+                    };
+                    if !ok {
+                        let widened = mixed_scope && under(&key, root_key);
+                        if !widened {
+                            return;
                         }
-                        found
-                    }
-                };
-                if !ok {
-                    let widened = mixed_scope && under(&nkey(&path), root_key);
-                    if !widened {
-                        return;
                     }
                 }
             }
@@ -961,6 +1025,8 @@ pub fn scan(opts: &ScanOptions, progress: &mut dyn FnMut(&str)) -> ScanResult {
     };
 
     let mut started: Vec<String> = Vec::new();
+    // 祖先目录集只算一次；只在真有选中项时才需要
+    let ancestors: Option<HashSet<String>> = selected_keys.as_ref().map(selected_ancestors);
     for start in &roots {
         let start_key = nkey(start);
         if started.iter().any(|seen| under(&start_key, &nkey(seen))) {
@@ -970,7 +1036,8 @@ pub fn scan(opts: &ScanOptions, progress: &mut dyn FnMut(&str)) -> ScanResult {
         // 从 root 出发时递归与否听用户的；从"root 之外的选中目录"出发时，
         // 那是用户明确拖进来的完整子树，一律扫全。
         let deep = !(root_key.is_empty() || under(&start_key, &root_key));
-        walker.walk_dir(start, 0, deep, &selected_keys, mixed_scope, &root_key);
+        walker.walk_dir(start, &start_key, 0, deep, &selected_keys, mixed_scope,
+                        &root_key, ancestors.as_ref());
     }
 
     res.skipped = skipped;
@@ -994,7 +1061,7 @@ pub struct SortItem<'a> {
 /// 全部算进数组再比较。别写成"在比较函数里现算 `natural_key`"：
 /// 那会变成 O(n log n) 次分配，2000 项实测从 6 ms 涨到 45 ms。
 pub fn sort_indices(items: &[SortItem], mode: &str) -> Vec<usize> {
-    let mode = if mode.is_empty() { "name_asc" } else { mode };
+    let mode = if mode.is_empty() { "path_asc" } else { mode };
     let n = items.len();
     let mut order: Vec<usize> = (0..n).collect();
     if mode == "none" {

@@ -6,9 +6,9 @@ PySide6 桌面界面 + 可脚本化命令行，共用同一套引擎；引擎是
 
 ![工作台](docs/screenshots/app1.png)
 
-`v2.0.2` · Windows 10/11 64 位 · 引擎 Rust（Python 3.15 扩展） · 界面 PySide6 6.10
+`v2.1.0` · Windows 10/11 64 位 · 引擎 Rust（Python 3.15 扩展） · 界面 PySide6 6.10
 
-不想装 Python / Rust？Releases 里有免安装的 `NameCat-2.0.2-win64.zip`，解压双击即用。
+不想装 Python / Rust？Releases 里有免安装的 `NameCat.exe`，下载双击即用。
 
 ---
 
@@ -80,8 +80,8 @@ PySide6 桌面界面 + 可脚本化命令行，共用同一套引擎；引擎是
 
 ### 方式一：绿色版（推荐，不需要 Python）
 
-1. 下载 `NameCat-2.0.2-win64.zip`，解压到任意目录（**不要留在压缩包里直接双击**）；
-2. 双击 `NameCat.exe`。
+1. 从 Releases 下载 `NameCat.exe`，保存到任意目录；
+2. 双击运行（无需解压、无需安装 Python）。
 
 单文件 exe 首次启动要解包约 30 MB 到 `%TEMP%`，比后续启动慢一两秒；被 SmartScreen 拦截时选「更多信息」→「仍要运行」。
 
@@ -227,12 +227,13 @@ py -3 verify\run_tests.py                  :: 引擎 + 端到端 + 回归（410 
 py -3 verify\test_edges.py                 :: 边界与异常路径（190 断言 + 16 个缺陷探针）
 py -3 verify\ui_smoke.py                   :: 界面全流程冒烟（离屏，无需显示器）
 py -3 verify\bench.py                       :: 性能基准（2000 文件，7 轮中位数）
-py -3 build_exe.py --zip                    :: 打包 + 自检 + 出 zip
+py -3 build_exe.py                          :: 打包 + 自检（产出 dist/NameCat.exe）
+py -3 build_exe.py --zip                    :: 额外压成 zip（本版起 Release 默认直发 EXE）
 ```
 
 - `rust_check.py` 拿 `verify/engine_symbols.json`（Rust 化之前固化的期望集）比对扩展导出，少一个符号就红。
 - `bench.py` 里带 1.6.3 的参考值，只能看量级 —— 严谨对比要在同一时段背靠背跑两版。
-- 发版流程：改 `engine/__init__.py` 的 `APP_VER` 与 `Cargo.toml` 版本（必须一致，`rust_build.py` 会校验）→ 重建 → 跑上面几条 → `build_exe.py --zip` → commit + `git tag -a vX.Y.Z` → push → `gh release create`。
+- 发版流程：改 `engine/__init__.py` 的 `APP_VER` 与 `Cargo.toml` 版本（必须一致，`rust_build.py` 会校验）→ 重建 → 跑上面几条 → `build_exe.py`（不加 `--zip`，直接拿 `dist/NameCat.exe`）→ commit + `git tag -a vX.Y.Z` → push → `gh release create … dist/NameCat.exe`。
 
 ### 性能（2000 个文件，迁移时背靠背 A/B）
 
@@ -252,6 +253,14 @@ py -3 build_exe.py --zip                    :: 打包 + 自检 + 出 zip
 - LLM 精简需要网络与密钥；离线时该规则自动放行，不会拖住其余规则。
 
 ## 更新记录
+
+### 2.1.0
+
+**排序方式默认改为「路径（先目录后名称）」**：原来是「名称（自然序）」，递归扫描多层目录时发号顺序会把不同文件夹的同名文件交错在一起；按路径排更符合「先整理目录、再按名称」的直觉。界面下拉、命令行 `--sort`、内置预设与引擎默认值已统一，已有预设里显式存的排序档不受影响。
+
+**大目录性能**：预览表改为自绘 + 只画可见行，9000 个图片文件从建表 259 秒降到 52 ms，勾选 / 全选 / 滚动回到毫秒级；扫描选中大量文件时的二次复杂度也一并修掉（详见 `docs/TEST_REPORT.md` 第 8.5 节）。
+
+**发布形态**：本版起 Release 直接提供单个 `NameCat.exe`，不再附 zip 压缩包。
 
 ### 2.0.2
 
