@@ -283,6 +283,11 @@ class HistoryPage(QWidget):
                              "success" if ok else "error")
         self.notice.show()
         self.status_message.emit("撤销完成" if ok else "撤销未完成")
+        # 撤销同样改了磁盘上的名字：工作台里那份 bundle 已失效，通知它重扫。
+        win = self.window()
+        ws = getattr(win, "page_ws", None)
+        if ws is not None and hasattr(ws, "mark_scan_outdated"):
+            ws.mark_scan_outdated("撤销完成，正在按磁盘现状刷新预览…")
         self.reload()
 
     def open_dir(self):

@@ -811,6 +811,15 @@ class WorkspacePage(QWidget):
         self.stale = False
         self._busy = False
         self._plan_after_scan = False
+        # 落盘 / 撤销会改磁盘上的名字，但 bundle 里的 Item 还是动作前那批。
+        # stale 只表示「规则改过、清单还能复用」；_scan_outdated 表示清单本身
+        # 已经和磁盘不一致，必须重新扫描，绝不能拿旧 Item 再算名 / 再落盘。
+        self._scan_outdated = False
+        self._rescan_after_apply = False       # 磁盘变更后待重扫
+        self._refresh_is_apply = False         # 本次扫描是不是「落盘后刷新」
+        self._rescan_tries = 0
+        self._apply_result_message = ""        # 重扫完把执行结果贴回状态槽
+        self._apply_result_tone = "success"
         self.runner = W.TaskRunner(self, max_threads=2)
 
         outer = vbox(self, (20, 18, 20, 12), 12)
@@ -1457,6 +1466,8 @@ class WorkspacePage(QWidget):
             self.sum_text.setText("")                    # 空状态的信息由拖放区说
         elif not has_plan:
             self.sum_text.setText("已扫描 %d 项，尚未应用规则" % stats.get("total", 0))
+        elif self._scan_outdated:
+            self.sum_text.setText("文件已变更，正在按磁盘现状刷新预览…")
         elif self.stale:
             self.sum_text.setText("配置已改动，预览已过期 — 请重新生成")
         else:
@@ -1466,8 +1477,10 @@ class WorkspacePage(QWidget):
             if conflict:
                 text += " · %d 项冲突将跳过" % conflict
             self.sum_text.setText(text)
-        can_apply = bool(has_plan and stats.get("ok") and not self.stale and not self._busy)
-        self.btn_csv.setEnabled(bool(has_plan) and not self._busy)
+        can_apply = bool(has_plan and stats.get("ok") and not self.stale
+                         and not self._scan_outdated and not self._busy)
+        self.btn_csv.setEnabled(bool(has_plan) and not self._scan_outdated
+                                and not self._busy)
         self.btn_apply.setEnabled(can_apply)
         self.btn_preview.setText("重新生成预览" if has_plan else
                                  ("生成预览" if has_scan else "预览变更"))
@@ -1708,6 +1721,22 @@ class WorkspacePage(QWidget):
             self.stale = True
         self._refresh_summary()
 
+    def mark_scan_outdated(self, message=""):
+        """外部动作（执行记录页撤销）改了磁盘：按同一套流程刷新工作台。"""
+        self._apply_result_message = str(message or "")
+        self._apply_result_tone = "info"
+        # 工作台还没选过目录 / 目录已不存在：别弹「还没有选择文件夹」，
+        # 只把旧清单标成失效，等用户下次扫描自然重建。
+        root = str(self.state.root or "")
+        if not root or not os.path.isdir(root):
+            self.stale = True
+            self._refresh_summary()
+            return
+        self._scan_outdated = True
+        self._rescan_after_apply = True
+        self.stale = True
+        self._schedule_apply_refresh()
+
     # ================= 规则操作 =================
     def add_rule(self, kind=""):
         if not kind:
@@ -1809,6 +1838,9 @@ class WorkspacePage(QWidget):
         self.state.selected = ()
         self.state.strict_selected = False
         self.bundle = None
+        self._scan_outdated = False
+        self._rescan_after_apply = False
+        self._refresh_is_apply = False
         self._refresh_preview()
         self._refresh_summary()
 
@@ -1955,6 +1987,7 @@ class WorkspacePage(QWidget):
         if not self._collect(need_rules=False):
             return
         self._plan_after_scan = bool(plan_after and self.rules)
+        self._refresh_is_apply = bool(self._rescan_after_apply)
         self._busy_set(True, "正在扫描…")
         self._scan_status_busy()
         task = W.scan_task(self.state)
@@ -1966,23 +1999,60 @@ class WorkspacePage(QWidget):
     def _scan_done(self, bundle):
         self.bundle = bundle
         self.stale = False
+        refresh = self._refresh_is_apply
+        self._refresh_is_apply = False
+        self._scan_outdated = False
+        self._rescan_after_apply = False
+        self._rescan_tries = 0
         self._refresh_preview()
         self._refresh_summary()
         n = len(bundle.items())
-        # 「已扫出 N 项」不占独立提示：结果就在扫描栏右侧的状态里（绿勾 5 秒后淡出）
-        self._scan_status_done()
-        self.status_message.emit("已扫描 %d 项" % n)
+        if refresh:
+            # 落盘结果比「已扫描 N 项」重要：重扫完把执行结果贴回状态槽，
+            # 别让刷新过程把成功/失败提示冲掉。
+            self._scan_status_message(self._apply_result_message,
+                                      self._apply_result_tone)
+            self.status_message.emit(self._apply_result_message)
+        else:
+            self._scan_status_done()
+            self.status_message.emit("已扫描 %d 项" % n)
         if not self.rules:
             self._pulse_add_rule()
 
     def _task_finished(self):
         self._busy_set(False)
+        # 执行 / 撤销改过磁盘：等任务线程彻底退出后，按磁盘现状重扫一次。
+        # 只扫清单、不自动再套规则（用户看到的应是刚落盘的名字）。
+        if self._rescan_after_apply:
+            self._schedule_apply_refresh()
+            return
         if self._plan_after_scan:
             self._plan_after_scan = False
             QTimer.singleShot(0, self.generate_plan)
 
+    def _schedule_apply_refresh(self, _tries=0):
+        """执行完一次落盘 / 撤销后排队重扫：成功即刷新，线程池还忙就等下一轮。"""
+        if not self._rescan_after_apply:
+            return
+        if _tries > 40:                       # 2 秒还没排上就放弃，别无限打转
+            self._rescan_after_apply = False
+            self._rescan_tries = 0
+            self._refresh_summary()
+            return
+        if self.runner.busy() or self._busy:
+            self._rescan_tries = _tries
+            QTimer.singleShot(50, lambda: self._schedule_apply_refresh(_tries + 1))
+            return
+        self._rescan_tries = 0
+        self.scan()
+
     def generate_plan(self):
         if self.runner.busy():
+            return
+        # 清单已和磁盘不一致（执行过 / 撤销过）：拿旧 Item 再算名会给出
+        # 与磁盘脱节的预览，甚至再次落盘撞 WinError 183。先重扫再说。
+        if self._scan_outdated:
+            self.scan(plan_after=True)
             return
         if self.bundle is None or not self.bundle.has_scan:
             self.scan(plan_after=True)
@@ -2013,13 +2083,22 @@ class WorkspacePage(QWidget):
 
     def _failed(self, message):
         self._busy_set(False)
+        self._refresh_is_apply = False
+        # 重扫失败时保留 _scan_outdated（清单仍然不可用），但别让
+        # _task_finished 再排一次队、也别无限重试；用户点预览会重新触发重扫。
+        self._rescan_after_apply = False
+        self._rescan_tries = 0
         if self.bundle is None or not self.bundle.has_scan:
             self._scan_status_idle()   # 没扫成：状态回灰色默认，别停在「正在扫描…」
         self._notice_msg("操作失败：%s" % message, "error")
         self.status_message.emit("操作失败：%s" % message)
+        self._refresh_summary()
 
     def request_preview(self):
-        if self.bundle is None or not self.bundle.has_scan:
+        # 清单与磁盘脱节时先重扫：既不能拿旧 Item 算名，也不能重复排队重扫。
+        if self._rescan_after_apply:
+            return
+        if self.bundle is None or not self.bundle.has_scan or self._scan_outdated:
             self.scan(plan_after=True)
         else:
             self.generate_plan()
@@ -2092,7 +2171,8 @@ class WorkspacePage(QWidget):
         self._notice_msg("已导出：%s" % out, "success")
 
     def confirm_apply(self):
-        if self.bundle is None or not self.bundle.has_plan or self._busy:
+        if (self.bundle is None or not self.bundle.has_plan or self._busy
+                or self._scan_outdated):
             return
         stats = self.bundle.stats()
         if not stats.get("ok"):
@@ -2126,8 +2206,13 @@ class WorkspacePage(QWidget):
         # 撤销日志路径不再进状态槽（执行记录页有完整列表），只报结果本身
         self._notice_msg(msg, "success" if ok else "error")
         self.status_message.emit(msg)
+        # 磁盘上的名字已经变了，旧 bundle 里的 Item 不能再用来算名 / 落盘。
+        # 任务 finished 之后排队重扫，预览会跟着磁盘现状一起更新。
+        self._apply_result_message = msg
+        self._apply_result_tone = "success" if ok else "error"
+        self._scan_outdated = True
+        self._rescan_after_apply = True
         self.stale = True
-        self._refresh_preview()
         self._refresh_summary()
 
     def _leftover_hint(self) -> str:
@@ -2164,6 +2249,9 @@ class WorkspacePage(QWidget):
             self.state.apply_plan_dict(preset.plan)
         self.selected_id = self.rules[0].id if self.rules else ""
         self.bundle = None
+        self._scan_outdated = False
+        self._rescan_after_apply = False
+        self._refresh_is_apply = False
         self.path.setText(self.state.root)
         self.only.set_value(self.state.only)
         self.sort.set_value(self.state.sort_mode)

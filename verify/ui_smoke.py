@@ -192,8 +192,21 @@ print("   csv:", os.path.isfile(csv_path))
 
 print("== 9. 执行落盘 ==")
 QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
+# 步骤 4 的高级筛选设了「名称包含 IMG」；执行后文件名变成 P_0001.jpg，
+# 带着旧过滤条件重扫只会得到空表，验证不到刷新本身。这里先清掉过滤，
+# 让「按磁盘现状重扫」拿到完整清单（plan.csv 也在目录里，两侧都会算上）。
+ws.state.only_match = ""
+ws.state.exclude_exts = ""
 ws.confirm_apply()
-wait_until(lambda: not ws._busy and not ws.runner.busy(), 8000)
+# 执行完会自动按磁盘现状重扫：等重扫结束，再断言预览与目录一致。
+wait_until(lambda: not ws._scan_outdated and not ws._rescan_after_apply
+           and not ws._busy and not ws.runner.busy(), 12000)
+on_disk = sorted(n for n in os.listdir(tmpdir) if os.path.isfile(os.path.join(tmpdir, n)))
+shown = sorted(getattr(it, "name", "") for it in ws.bundle.items())
+assert not ws._scan_outdated, "执行后清单仍标成失效，预览没有刷新"
+assert shown == on_disk, "执行后预览未跟上磁盘：table=%s disk=%s" % (shown, on_disk)
+assert not ws.btn_apply.isEnabled(), "刷新清单前不该允许再次执行旧计划"
+step("执行后自动重扫预览", lambda: None)
 print("   目录：", sorted(os.listdir(tmpdir))[:6])
 
 print("== 10. 执行记录 + 撤销 ==")
@@ -219,6 +232,13 @@ step("执行记录（全部目录）", history_all)
 
 step("撤销", lambda: (w.page_history._undo(w.page_history._rows[0]),
                     wait_until(lambda: not w.page_history.runner.busy(), 8000)))
+# 撤销同样改了磁盘：工作台要按磁盘现状重建预览。
+wait_until(lambda: not ws._scan_outdated and not ws._rescan_after_apply
+           and not ws._busy and not ws.runner.busy(), 12000)
+on_disk = sorted(n for n in os.listdir(tmpdir) if os.path.isfile(os.path.join(tmpdir, n)))
+shown = sorted(getattr(it, "name", "") for it in ws.bundle.items())
+assert shown == on_disk, "撤销后预览未跟上磁盘：table=%s disk=%s" % (shown, on_disk)
+step("撤销后自动重扫预览", lambda: None)
 print("   撤销后目录：", sorted(os.listdir(tmpdir))[:6])
 
 print("== 11. 预设：应用 / 保存 / 删除 ==")
