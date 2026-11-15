@@ -103,8 +103,18 @@ pub fn execute(
     stop: &StopFlag,
     progress: &dyn Progress,
 ) -> crate::model::Result<ExecResult> {
-    if opts.conflict.is_dangerous() && !opts.overwrite_confirmed {
-        return Err(Error::Invalid("覆盖属于危险操作，必须先由用户确认"));
+    // 预览即承诺：一份计划只能执行一次。模拟运行会把状态改写成 DryRun，
+    // 真实执行会写成 Done；拿旧计划重跑会对已搬走的文件全部报错，并额外
+    // 生成一份空撤销日志，把真正那份日志挤到「撤销上次」永远够不着的位置。
+    crate::plan::validate_for_execute(plan, opts)?;
+    // 危险确认只在「真正写盘」时要求；模拟运行零写入，覆盖预览也不该被拦。
+    if !dry_run {
+        if crate::plan::plan_looks_executed(plan) {
+            return Err(Error::Invalid("这批文件似乎已经搬运过，请重新扫描预览后再执行"));
+        }
+        if opts.conflict.is_dangerous() && !opts.overwrite_confirmed {
+            return Err(Error::Invalid("覆盖属于危险操作，必须先由用户确认"));
+        }
     }
     let total = plan.items.len();
     let throttle = ThrottledProgress::new(progress, total);
@@ -175,8 +185,29 @@ fn real_execute(
     stop: &StopFlag,
     throttle: &ThrottledProgress<'_>,
 ) -> crate::model::Result<ExecResult> {
+    // ---- 没有任何可处理项时不要写日志 ----
+    // 空计划 / 全是 Skip 的计划若仍生成一份 Active 空日志，会挡在真正的
+    // 撤销记录前面（undo_latest 找到它、0 条目、标 Undone），让「撤销上次」
+    // 永远够不着真实数据。这类执行本就零写入，直接返回干净结果。
+    let actionable = plan.items.iter().any(|it| {
+        !matches!(it.status, FileStatus::Skip | FileStatus::Error)
+    });
+    let may_clean = opts.clean_empty_dirs
+        && plan.empty_dir_candidates.iter().any(|d| d != &plan.root);
+    if !actionable && !may_clean {
+        let mut result = ExecResult {
+            started: plan.items.len(),
+            ..Default::default()
+        };
+        result.items = plan.items.clone();
+        throttle.emit(0, "没有需要搬运的文件，未写入任何日志", true);
+        return Ok(result);
+    }
+
     // ---- 前置：日志目录与初始日志必须先写成功 ----
     let (log_dir, op_id, log_path) = rollback::prepare_log(opts)?;
+    // 整个执行期只打开一次检查点文件句柄
+    let mut pending = rollback::PendingWriter::open(&log_path)?;
     let mut log = RollbackLog {
         schema: crate::model::SCHEMA,
         app: "FileCat".into(),
@@ -223,11 +254,16 @@ fn real_execute(
 
         match execute_one(opts, &mut it, &log_dir, &op_id, i) {
             Ok(Some(entry)) => {
-                // 成功：写检查点日志（失败不阻断执行，但记下错误）
+                // 逐条追加检查点（O(1) append + flush）。写失败等价于「这之后的
+                // 搬移都无法撤销」，绝不能继续搬后续文件：立即置停止标志，让循环
+                // 在下一项之前收尾，并把错误显著写进日志/结果。
                 if let Err(e) = rollback::checkpoint(
-                    &log_path, &mut log, entry, &cleaned, &errors, false,
+                    &mut pending, &mut log, entry, &cleaned, &errors,
                 ) {
-                    errors.push(format!("日志检查点写入失败：{e}"));
+                    errors.push(format!(
+                        "严重：撤销日志检查点写入失败，已停止后续搬运以免产生不可撤销文件：{e}"
+                    ));
+                    stop.stop();
                 }
                 result.succeeded += 1;
             }
@@ -287,6 +323,9 @@ fn real_execute(
         }
     }
 
+    // 先关闭检查点句柄，再让 finalize_log 读它合成正式日志（Windows 文件共享更稳）。
+    drop(pending);
+
     // ---- 最终日志：原子替换；失败必须明确告知（数据与备份仍在，可人工恢复） ----
     if let Err(e) = rollback::finalize_log(&log_path, &mut log, &result, &cleaned) {
         errors.push(format!("最终撤销日志写入失败：{e}（文件与备份仍保留）"));
@@ -322,13 +361,12 @@ fn execute_one(
                 use std::collections::HashSet;
                 let mut occupied = HashSet::new();
                 occupied.insert(it.target.to_string_lossy().to_ascii_lowercase());
-                let (new_name, new_path) =
-                    crate::plan::unique_name(&it.target_dir, &it.name, &occupied);
-                if file_exists(&new_path) {
-                    it.status = FileStatus::Error;
-                    it.message = "执行前出现同名文件，自动改名仍冲突".into();
-                    return Err(Error::io("执行前出现同名文件，自动改名仍冲突"));
-                }
+                // 带磁盘探测：扫描后外部新建的 a (2).ext、以及本批次刚搬过去的
+                // 同名目标都要跳过，直到找到真正空闲的名字，而不是只试一次就报错。
+                let ((new_name, new_path), _) = crate::plan::unique_name_checked(
+                    &it.target_dir, &it.name, &occupied, 2,
+                    &|p| file_exists(p),
+                );
                 it.target = new_path;
                 it.renamed = true;
                 it.status = FileStatus::Renamed;
@@ -351,8 +389,19 @@ fn execute_one(
         } else {
             // 覆盖前必须备份成功，否则本项失败、源文件不动
             let rel = rollback::make_backup(&it.target, log_dir, op_id, seq)?;
-            backup_rel = Some(rel);
-            replace_with_backup(&it.source, &it.target)?;
+            backup_rel = Some(rel.clone());
+            if let Err(e) = replace_with_backup(&it.source, &it.target) {
+                // replace_with_backup 是「先删原目标、再移动」两步。若移动失败，
+                // 原目标已被删除、只剩备份 —— 必须立刻用备份把目标位置复原，
+                // 否则目标永久空缺，用户只能去 backups/ 里手工捞。
+                let backup_abs = log_dir.join(&rel);
+                if let Err(restore) = crate::fs::restore_from_backup(&backup_abs, &it.target) {
+                    return Err(Error::io(format!(
+                        "覆盖移动失败且备份恢复失败（原目标备份在 {backup_abs:?}）：{e} / {restore}"
+                    )));
+                }
+                return Err(Error::io(format!("覆盖移动失败，原目标已从备份恢复：{e}")));
+            }
         }
     }
     if !it.overwritten {

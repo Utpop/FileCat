@@ -10,26 +10,50 @@
 use crate::model::{Error, Result};
 use std::path::{Path, PathBuf};
 
-/// 把路径转成 `\\?\` 前缀的绝对形式。Unicode 路径用 `to_string_lossy` 之外
-/// 的 `encode_wide`，避免中文/emoji 路径被 `to_str()` 拒掉。
+/// 把路径转成 `\\?\` 前缀的绝对形式。
+///
+/// 用 `OsStr::encode_wide` 而不是 `to_string_lossy().encode_utf16()`：后者会把
+/// Windows 上合法的未配对 surrogate（NTFS 允许）替换成 U+FFFD，导致
+/// `MoveFileExW` 找不到真实文件、搬移失败。`encode_wide` 原样保留 UTF-16 单元。
 pub fn long_path(path: &Path) -> Result<Vec<u16>> {
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()?.join(path)
     };
-    let text = abs.to_string_lossy().replace('/', "\\");
-    let normalized = if text.starts_with(r"\\?\") {
-        text
-    } else if text.starts_with(r"\\") {
-        // UNC：\\server\share → \\?\UNC\server\share
-        format!(r"\\?\UNC\{}", &text[2..])
-    } else {
-        format!(r"\\?\{}", text)
-    };
-    let mut wide: Vec<u16> = normalized.encode_utf16().collect();
-    wide.push(0);
-    Ok(wide)
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let mut units: Vec<u16> = abs.as_os_str().encode_wide().collect();
+        let is_verbatim = units.starts_with(&[92, 92, 63, 92]); // \\?\
+        let is_unc = !is_verbatim
+            && units.starts_with(&[92, 92]); // \\server\share
+        let mut wide: Vec<u16> = if is_verbatim {
+            Vec::new()
+        } else if is_unc {
+            units.drain(..2); // 去掉开头的 \\，由 \\?\UNC\ 补上
+            r"\\?\UNC\".encode_utf16().collect()
+        } else {
+            r"\\?\".encode_utf16().collect()
+        };
+        wide.extend(units);
+        wide.push(0);
+        Ok(wide)
+    }
+    #[cfg(not(windows))]
+    {
+        let text = abs.to_string_lossy().replace('/', "\\");
+        let normalized = if text.starts_with(r"\\?\") {
+            text
+        } else if text.starts_with(r"\\") {
+            format!(r"\\?\UNC\{}", &text[2..])
+        } else {
+            format!(r"\\?\{}", text)
+        };
+        let mut wide: Vec<u16> = normalized.encode_utf16().collect();
+        wide.push(0);
+        Ok(wide)
+    }
 }
 
 /// 直接调用 Win32，绕过 `std` 的规范化，避免把 `\\?\` 又拆回普通路径。
@@ -115,8 +139,11 @@ pub fn is_dir_empty(path: &Path) -> Result<bool> {
     Ok(it.next().is_none())
 }
 
-/// 原子式非覆盖移动：`MoveFileExW(flags=0)`，目标已存在直接失败。
-/// 跨卷时 Windows 需要 `MOVEFILE_COPY_ALLOWED`，第一次失败就带它重试。
+/// 原子式非覆盖移动：`MoveFileExW` + `MOVEFILE_COPY_ALLOWED`，目标已存在直接失败。
+///
+/// 不再带 `MOVEFILE_WRITE_THROUGH`：那个标志强制每次移动都同步刷盘，实测
+/// 3000 个小文件执行要 ~9s，是整条链路最大的性能瓶颈。撤销安全性由「逐条
+/// 追加检查点日志 + 覆盖前备份」保证，不依赖每次 rename 的 fsync。
 pub fn move_no_replace(source: &Path, target: &Path) -> Result<()> {
     if file_exists(target) {
         return Err(Error::io("目标已存在，拒绝覆盖"));
@@ -124,11 +151,11 @@ pub fn move_no_replace(source: &Path, target: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         use windows_sys::Win32::Storage::FileSystem::{
-            MoveFileExW, MOVEFILE_COPY_ALLOWED, MOVEFILE_WRITE_THROUGH,
+            MoveFileExW, MOVEFILE_COPY_ALLOWED,
         };
         let src = win_path(source)?;
         let dst = win_path(target)?;
-        let flags = MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH;
+        let flags = MOVEFILE_COPY_ALLOWED;
         let ok = unsafe { MoveFileExW(src.as_ptr(), dst.as_ptr(), flags) };
         if ok != 0 {
             return Ok(());
@@ -146,6 +173,16 @@ pub fn move_no_replace(source: &Path, target: &Path) -> Result<()> {
         std::fs::rename(source, target)?;
         Ok(())
     }
+}
+
+/// 用备份恢复被 `replace_with_backup` 删掉但没能用源文件替换的目标。
+/// 目标位置此刻应为空；若被第三方抢先放了文件，绝不覆盖，直接报错。
+pub fn restore_from_backup(backup: &Path, target: &Path) -> Result<()> {
+    if file_exists(target) {
+        return Err(Error::io("恢复位置已被占用，拒绝覆盖"));
+    }
+    std::fs::copy(backup, target).map_err(Error::Io)?;
+    Ok(())
 }
 
 /// 覆盖移动：调用方**必须**先 `backup_file` 成功。先用非覆盖删除原目标，

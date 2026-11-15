@@ -3,7 +3,7 @@
 > 面向后续维护者 / Agent 的项目地图与改动手册。
 > 依据 2026-11-14 对当前工作树的静态审查写成（含 `git log` 至 `8e66c73`），只记录实读代码与文档，审查过程未改动源码、未运行测试与构建。
 > **仓库根**：`C:\Users\LocalAcc\WorkBuddy\NameCAT\NameCAT\`（外层同名目录只是工作区容器，`.git` 在内层）。本文所有路径都相对仓库根。
-> **当前版本 3.0.0**（`engine/__init__.py:APP_VER` 与 `Cargo.toml:[workspace.package].version` 两处一致）；程序名 FileCat；四个页面：文件重命名 / 文件提取 / 执行记录 / 供应商配置（预设改为页内弹窗）。§11 记录文件提取引擎与 GUI 集成。
+> **当前版本 3.0.1**（`engine/__init__.py:APP_VER` 与 `Cargo.toml:[workspace.package].version` 两处一致）；程序名 FileCat；四个页面：文件重命名 / 文件提取 / 执行记录 / 供应商配置（预设改为页内弹窗）。§11 记录文件提取引擎与 GUI 集成，§11.12 记录 3.0.1 审计修复。
 
 ---
 
@@ -441,7 +441,7 @@ PYTHONPATH="_vendor;." py -3 verify/ui_smoke.py          :: 原 GUI 全流程回
 
 ### 11.10 已知限制
 
-- `py.detach` 下进度回调的 Python 异常被吞（只影响提示，不影响文件安全）。
+- 3.0.1 起进度回调异常经 `write_unraisable` 上报，不再静默吞（见 §11.12）。
 - 非 Windows 分支仅保留可编译语义（`MoveFileExW` 是 Windows 专属），项目仍只支持 Windows。
 - 清单树用 `QTreeWidget` 承载分组/折叠；上万行时插入成本高于工作台的自绘表，但扫描与执行本身已在后台线程且 Rust 侧节流进度，界面不会卡死。
 - 未跑 `build_exe.py` 整包（只在 `--check` 与 stale 覆盖层面验证）；`.pyd` 已就位，打包链路零改动。
@@ -456,3 +456,23 @@ PYTHONPATH="_vendor;." py -3 verify/ui_smoke.py          :: 原 GUI 全流程回
 **预设页 → 独立对话框**：`ui/pages/presets.py` 的 `PresetsPage` 改为 `PresetDialog(QDialog)`（选择 / 编辑 / 删除 / 恢复 / 打开目录；编辑可改名与说明，内置预设编辑后另存为自定义，不改动内置数据）。主窗口删掉预设页，`NAV` 变 4 页（0 文件重命名 / 1 文件提取 / 2 执行记录 / 3 供应商配置），`_goto` 分支、气泡跳转 → 3、`Ctrl+1…4`、帮助文案同步；「加载预设」按钮 `load_preset_requested` 连到 `MainWindow.open_preset_dialog()`，对话框 `applied` 信号回调 `apply_preset()`。`save_preset()` 不再 reload 页面。`verify/ui_smoke.py` 改为构造 `PresetDialog` 并断言信号连到弹窗。
 
 **扫描对象下拉（最终按用户要求回退）**：恢复原样式——无前置标签、宽 148、`ONLY_LABELS` 回到「仅文件 / 仅文件夹 / 仅图片 / 仅视频 / 图片 + 视频」原文案；`ONLY_ORDER` 去掉 `all`，界面不再提供「文件 + 文件夹」同时扫描；默认 `FormState.only = "media"`（图片 + 视频）。`ONLY_LABELS["all"]` 与 `ONLY_CHOICES["all"]`（CLI `--only all`）保留以支持命令行和旧预设读取；`apply_scan_dict()` 反推命中 `all` 时回落到默认档 `media`，避免显示一个下拉里不存在的原始代号。`verify/ui_smoke.py` 第 4a 步钉住这些约束。
+
+### 11.12 3.0.1 文件提取引擎审计修复（2026-11-15）
+
+对 3.0.0 新增的提取引擎与 GUI 做逐文件审查 + 探针实证后的缺陷修复，全部有回归测试钉住。
+
+**契约变更（影响调用方）**：`plan::build_plan` 不再要求 `overwrite_confirmed`（只读预览不该拦用户），危险确认只在 `execute(dry_run=false)` 校验；`execute` 顶层新增 `validate_for_execute(plan, opts)` —— 校验 `plan.conflict == opts.conflict`、`canonical(plan.root) == canonical(opts.root)`、每个 source/target 都在 root 内、非 Skip 项 `target != source`、`overwritten` 仅 Overwrite 允许且同目标唯一；另有 `plan_looks_executed()` 磁盘兜底，拒绝拿已执行过的计划重跑。
+
+**撤销数据完整性**：
+- 真实执行后 GUI 把 `plan` 置 `None`（`has_plan=False`），模拟运行不消费计划；引擎 `undo_latest` 跳过 0 条目日志；`real_execute` 无可处理项时不写日志 —— 三者共同堵住「空日志挡住撤销上次」。
+- 检查点改为 `<日志>.pending` 逐条 NDJSON append（`PendingWriter` 整个执行期只 open 一次，每行 flush），崩溃最多丢最后一项；`list_logs` 纯只读合成、`undo_one` 才原子写回恢复结果；checkpoint 写失败立即 `stop.stop()` 停止后续搬运；`finalize_log` 比对内存与 pending 计数，不一致告警且保留 `.pending`。
+- `undo_one` 所有 skipped/failed 分支统一 `remaining.push()`，部分失败重入仍能恢复；覆盖撤销先校验备份再动目标，copy 失败把新文件搬回目标；`replace_with_backup` 移动失败时 `restore_from_backup` 复原原目标。
+- `fs.rs` 去掉 `MOVEFILE_WRITE_THROUGH`（性能），撤销安全性改由检查点保证；`long_path` 改用 `OsStr::encode_wide` 保留非 UTF-8 路径的原始 UTF-16 单元。
+
+**性能**：3000 文件执行 8.97s → 3.27s（-63.6%）。CSV 直接 CRLF 写行、去掉整串双重 replace；`unique_name_checked` 带磁盘探测 + `name_counters` 消除同名文件 O(n²)；`PyProgress` 自带 40ms 节流（撤销路径）；`list_logs` / `read_log` / `export_csv` 补 `py.detach`。
+
+**GUI / 绑定层**：`overwrite_confirmed` 在 `_mark_dirty` / `scan` / 真实执行收尾一律复位；`_start_task` 统一 `_busy` 防重入 + 唯一 task_id + `finished` 兜底；忙时冻结全部输入控件，`btn_stop` 仅在 dry/exec 阶段可用；`TaskRunner` 之外补 `except BaseException`（PyO3 `PanicException`）、`StopGuard` RAII 清理、`register_stop` 提前到 `py.detach` 之前；`history._undo_done` 改用 `QTimer.singleShot(0, reload)`；`filter_items` 同时匹配中文状态文案与 `target_dir`；`ExtractBundle` 的 `PathBuf` 字段加 lossy serde，避免非 UTF-8 文件名导致「文件搬完却拿不到 log_path」。
+
+**已知限制（3.0.1 新增）**：非 UTF-8（未配对 surrogate）文件名经 JSON 跨语言往返会 lossy 成 U+FFFD，能正常返回日志路径但会按「源文件不存在」在清单里明确报错、跳过搬移（彻底支持需接口级改用 WTF-8/base64 编码路径）。
+
+**回归**：`cargo test -p namecat-extract-core` 12 单元 + 20 集成（新增 8 组：多源覆盖、重跑拒绝、空日志、崩溃恢复、撤销重入、伪造 plan、非 UTF-8、覆盖确认契约）；`cargo test --workspace` 112+1+12+20；四套 Python / GUI 冒烟与 410 / 190 断言全过。

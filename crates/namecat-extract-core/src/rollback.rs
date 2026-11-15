@@ -50,8 +50,18 @@ fn now_text() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
-/// 预写空日志（执行前）。进程中途异常退出时，至少保留 operation_id / root / 时间，
-/// 便于人工恢复。返回 (目录, 操作 ID, 日志路径)。
+/// 追加式检查点文件：`<日志名>.pending`，每行一条 RollbackEntry 的紧凑 JSON。
+/// 每成功搬走一个文件就 append 一行并 flush（O(1)），崩溃时最多丢最后一行，
+/// 不再有「每 25 项才全量重写一次、最后 24 项无记录」的窗口。
+fn pending_path(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(".pending");
+    PathBuf::from(s)
+}
+
+/// 预写空日志（执行前）+ 创建空的检查点文件。进程中途异常退出时，
+/// 至少保留 operation_id / root / 时间，以及已成功项的逐条记录，便于恢复。
+/// 返回 (目录, 操作 ID, 日志路径)。
 pub fn prepare_log(opts: &ExtractOptions) -> crate::model::Result<(PathBuf, String, PathBuf)> {
     let dir = ensure_rollback_dir(&opts.program_root)?;
     let op_id = new_operation_id();
@@ -72,7 +82,22 @@ pub fn prepare_log(opts: &ExtractOptions) -> crate::model::Result<(PathBuf, Stri
         errors: Vec::new(),
     };
     write_log_atomic(&path, &log)?;
+    // 先写正式日志再建 pending：若这一步失败，prepare_log 直接 Err，
+    // 调用方会在搬任何文件之前拒绝执行。
+    std::fs::write(pending_path(&path), b"")?;
     Ok((dir, op_id, path))
+}
+
+/// 从追加式检查点恢复全部已成功项（崩溃恢复 / finalize 合成用）。
+/// 单独一行损坏只跳过它，不让整份日志作废。
+pub fn read_pending(path: &Path) -> Vec<RollbackEntry> {
+    let Ok(text) = std::fs::read_to_string(pending_path(path)) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<RollbackEntry>(l).ok())
+        .collect()
 }
 
 /// 原子写日志：先写 `<name>.tmp`，再 rename 成最终文件。
@@ -101,14 +126,27 @@ pub fn list_logs(program_root: &str) -> Vec<(PathBuf, RollbackLog)> {
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
+        // .pending 是检查点，不是日志；跳过（否则会被当成无扩展名的坏文件）
+        if path.as_os_str().to_string_lossy().ends_with(".pending") {
+            continue;
+        }
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let Ok(log) = serde_json::from_str::<RollbackLog>(&text) else {
+        let Ok(mut log) = serde_json::from_str::<RollbackLog>(&text) else {
             continue;
         };
         if log.schema > SCHEMA {
             continue; // 未来版本不猜
+        }
+        // 崩溃恢复只在这里「读」出来供列表展示，绝不写回日志：
+        // 执行过程中 GUI 刷新日志页若把 running 固化成 recovered，
+        // 后续 .pending 的成功项就永远不会被合成（见 undo_one 里的恢复）。
+        if log.result == "running" {
+            let recovered = read_pending(&path);
+            if !recovered.is_empty() {
+                log.entries = recovered;
+            }
         }
         out.push((path, log));
     }
@@ -117,10 +155,15 @@ pub fn list_logs(program_root: &str) -> Vec<(PathBuf, RollbackLog)> {
 }
 
 /// 撤销「最新一份仍有效（Active / Partial）」的操作记录。
+///
+/// 忽略 0 条目的空日志：重复执行旧计划、空目录执行都会产生这种记录，
+/// 若不跳过，它会挡在真正那份日志前面，让「撤销上次」永远够不着真实数据。
 pub fn undo_latest(program_root: &str, progress: &dyn Progress) -> crate::model::Result<UndoResult> {
     let candidate = list_logs(program_root)
         .into_iter()
-        .find(|(_, log)| log.state != RollbackState::Undone && !log.dry_run);
+        .find(|(_, log)| {
+            log.state != RollbackState::Undone && !log.dry_run && !log.entries.is_empty()
+        });
     match candidate {
         Some((path, log)) => undo_one(&path, &log, progress),
         None => Ok(UndoResult {
@@ -148,6 +191,21 @@ fn undo_one(path: &Path, log: &RollbackLog, progress: &dyn Progress) -> crate::m
         });
     }
     let dir = path.parent().ok_or_else(|| Error::Log("日志没有父目录".into()))?;
+
+    // 崩溃恢复：正式日志停在 running（没来得及 finalize）时，用逐条落盘的
+    // .pending 补齐 entries。恢复只发生在「真正要撤销」的这一刻，并在这里
+    // 原子写回一份完整日志，之后 list_logs / 二次撤销都能正常读到。
+    let mut effective = log.clone();
+    if effective.result == "running" {
+        let recovered = read_pending(path);
+        if !recovered.is_empty() {
+            effective.entries = recovered;
+            effective.result = "recovered_from_checkpoint".into();
+            write_log_atomic(path, &effective)?;
+        }
+    }
+    let log = &effective;
+
     let total = log.entries.len();
     let mut out = UndoResult {
         operation_id: log.operation_id.clone(),
@@ -171,15 +229,19 @@ fn undo_one(path: &Path, log: &RollbackLog, progress: &dyn Progress) -> crate::m
 
     for (i, entry) in log.entries.iter().enumerate() {
         progress.on_progress(i + 1, total, &format!("撤销 {}", entry.target.display()));
-        // 只处理实际执行成功的项
+        // 只处理实际执行成功的项。跳过也必须把条目留在日志里（remaining），
+        // 否则部分失败后重入时这条记录已经消失，文件再也撤不回来。
         if entry.status != FileStatus::Done {
             out.skipped += 1;
+            remaining.push(entry.clone());
             continue;
         }
-        // 目标还在吗？被用户移动/删除 → 跳过，绝不强行重建
+        // 目标还在吗？被用户移动/删除 → 跳过，绝不强行重建；但保留条目，
+        // 用户把文件放回后仍可再次撤销。
         if !file_exists(&entry.target) {
             out.skipped += 1;
             out.errors.push(format!("目标已不存在，跳过：{}", entry.target.display()));
+            remaining.push(entry.clone());
             continue;
         }
         // 目标被用户后续修改过 → 跳过，避免覆盖用户新数据
@@ -209,32 +271,49 @@ fn undo_one(path: &Path, log: &RollbackLog, progress: &dyn Progress) -> crate::m
         }
 
         if entry.overwritten {
-            // 覆盖操作：先把「新文件」搬回原位置，再把备份恢复到目标位置。
+            // 覆盖项：先确认备份还在，再动目标。备份缺失时绝不能把新文件
+            // 搬走（那样目标位置会永久空缺），直接失败并保留条目。
+            let backup = entry
+                .backup
+                .as_ref()
+                .map(|b| if b.is_absolute() { b.clone() } else { dir.join(b) });
+            let Some(b) = backup else {
+                out.failed += 1;
+                out.errors.push(format!("未记录备份路径，无法恢复：{}", entry.target.display()));
+                remaining.push(entry.clone());
+                continue;
+            };
+            if !file_exists(&b) {
+                out.failed += 1;
+                out.errors.push(format!("备份文件缺失，无法恢复：{}", entry.target.display()));
+                remaining.push(entry.clone());
+                continue;
+            }
+            // 先把「新文件」搬回原位置
             if let Err(e) = move_no_replace(&entry.target, &entry.source) {
                 out.failed += 1;
                 out.errors.push(format!("恢复新文件失败：{e}"));
                 remaining.push(entry.clone());
                 continue;
             }
-            let backup = entry
-                .backup
-                .as_ref()
-                .map(|b| if b.is_absolute() { b.clone() } else { dir.join(b) });
-            match backup {
-                Some(b) if file_exists(&b) => {
-                    if let Err(e) = std::fs::copy(&b, &entry.target) {
-                        out.failed += 1;
-                        out.errors.push(format!("恢复备份失败：{e}"));
-                        remaining.push(entry.clone());
-                        continue;
-                    }
-                }
-                _ => {
-                    out.failed += 1;
-                    out.errors.push(format!("备份文件缺失，无法恢复：{}", entry.target.display()));
-                    remaining.push(entry.clone());
-                    continue;
-                }
+            // 目标位置此刻应为空；若被第三方抢先放了文件，绝不覆盖它，
+            // 而是把新文件搬回目标、保留条目，等用户处理后再重入。
+            if file_exists(&entry.target) {
+                let _ = move_no_replace(&entry.source, &entry.target);
+                out.failed += 1;
+                out.errors.push(format!("目标位置已被占用，撤销暂停：{}", entry.target.display()));
+                remaining.push(entry.clone());
+                continue;
+            }
+            if let Err(e) = std::fs::copy(&b, &entry.target) {
+                // copy 失败时目标和原位置都空着 —— 必须把刚搬回去的新文件
+                // 再搬回目标，让磁盘回到「撤销前」的一致状态，否则重入时
+                // 目标不存在会被跳过、条目消失。
+                let _ = move_no_replace(&entry.source, &entry.target);
+                out.failed += 1;
+                out.errors.push(format!("恢复备份失败（已回滚，可重试）：{e}"));
+                remaining.push(entry.clone());
+                continue;
             }
         } else if let Err(e) = move_no_replace(&entry.target, &entry.source) {
             out.failed += 1;
@@ -260,29 +339,61 @@ fn undo_one(path: &Path, log: &RollbackLog, progress: &dyn Progress) -> crate::m
     };
     // 失败/跳过时**保留日志与备份**，只更新状态；成功也保留日志（不自动删除有效记录）。
     write_log_atomic(path, &updated)?;
+    // 撤销已收尾，清掉可能残留的崩溃检查点，避免以后被重复合成。
+    if out.complete {
+        let _ = std::fs::remove_file(pending_path(path));
+    }
     Ok(out)
 }
 
-/// 执行期把一条成功记录追加进内存日志并按需落盘（检查点）。
+/// 执行期持有的检查点写入器：整个执行过程只 open 一次 .pending 文件。
+///
+/// 逐条 `write + flush` 保证崩溃时最多丢最后一行；若每项都重新 open/close，
+/// 3000 文件实测要多花约 1s（1.07s vs 0.019s），纯属无谓的句柄开销。
+pub struct PendingWriter {
+    file: std::fs::File,
+}
+
+impl PendingWriter {
+    pub fn open(log_path: &Path) -> crate::model::Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(pending_path(log_path))?;
+        Ok(Self { file })
+    }
+
+    pub fn append(&mut self, entry: &RollbackEntry) -> crate::model::Result<()> {
+        use std::io::Write as _;
+        let line = serde_json::to_string(entry).map_err(|e| Error::Json(e.to_string()))?;
+        self.file.write_all(line.as_bytes())?;
+        self.file.write_all(b"\n")?;
+        self.file.flush()?;
+        Ok(())
+    }
+}
+
+/// 把一条成功记录追加进内存日志与检查点文件（O(1)，不再全量重写 JSON）。
+/// 先落盘再改内存：写失败时该项仍会被记为失败，不会出现「日志说成功、
+/// 磁盘却没记录」的反向不一致。
 pub fn checkpoint(
-    path: &Path,
+    writer: &mut PendingWriter,
     log: &mut RollbackLog,
     entry: RollbackEntry,
     cleaned: &[CleanedDir],
     errors: &[String],
-    force: bool,
 ) -> crate::model::Result<()> {
+    writer.append(&entry)?;
     log.entries.push(entry);
     log.cleaned_dirs = cleaned.to_vec();
     log.errors = errors.to_vec();
-    // 每 25 项或强制时落盘一次，兼顾崩溃可恢复性与大量小文件性能
-    if force || log.entries.len() % 25 == 0 {
-        write_log_atomic(path, log)?;
-    }
     Ok(())
 }
 
 /// 把执行结果收束成最终日志（原子写）。
+///
+/// entries 以检查点文件为准重新合成，保证「正式日志」与逐条落盘的记录
+/// 完全一致；随后删除 .pending，标记这次操作已正常收尾。
 pub fn finalize_log(
     path: &Path,
     log: &mut RollbackLog,
@@ -296,9 +407,29 @@ pub fn finalize_log(
     } else {
         "completed".into()
     };
+    // 以「检查点文件」与「内存累计」中较完整的一份为准。两者不一致说明
+    // .pending 被外部删改 / 读取失败 / 有损坏行，此时绝不能静默写成 0 条目
+    // 的 completed 日志（那样整批搬移都无法撤销），必须报警并保留 .pending。
+    let recovered = read_pending(path);
+    let mut final_errors = result.errors.clone();
+    if recovered.len() != log.entries.len() {
+        final_errors.push(format!(
+            "警告：检查点记录数({})与内存累计({})不一致，已保留较完整的一份；请检查 .pending 是否完整",
+            recovered.len(), log.entries.len()
+        ));
+    }
+    if recovered.len() >= log.entries.len() {
+        log.entries = recovered;
+    }
     log.cleaned_dirs = cleaned.to_vec();
-    log.errors = result.errors.clone();
-    write_log_atomic(path, log)
+    // 有严重检查点错误时保留 .pending，方便人工/后续恢复，绝不静默删除。
+    let keep_pending = final_errors.iter().any(|e| e.contains("检查点写入失败"));
+    log.errors = final_errors;
+    write_log_atomic(path, log)?;
+    if !keep_pending {
+        let _ = std::fs::remove_file(pending_path(path));
+    }
+    Ok(())
 }
 
 /// 覆盖前备份：返回相对日志目录的路径。

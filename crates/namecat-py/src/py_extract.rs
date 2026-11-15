@@ -115,15 +115,52 @@ fn plan_from_py(obj: Option<&Bound<'_, PyAny>>) -> PyResult<core::model::Extract
 
 struct PyProgress {
     callback: Py<PyAny>,
+    /// 自带节流：撤销路径没有 ThrottledProgress，9000 条记录会每条目一次
+    /// attach + Qt 投递，把主线程事件队列灌爆。40ms 节流 + 首末项必发。
+    last: std::sync::Mutex<std::time::Instant>,
+    sent_first: std::sync::atomic::AtomicBool,
+}
+
+impl PyProgress {
+    fn new(callback: Py<PyAny>) -> Self {
+        Self {
+            callback,
+            last: std::sync::Mutex::new(
+                std::time::Instant::now() - std::time::Duration::from_secs(1),
+            ),
+            sent_first: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn should_emit(&self, current: usize, total: usize) -> bool {
+        use std::sync::atomic::Ordering;
+        let first = !self.sent_first.swap(true, Ordering::SeqCst);
+        let last = total > 0 && current >= total;
+        if first || last {
+            return true;
+        }
+        let mut guard = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.elapsed() >= std::time::Duration::from_millis(40) {
+            *guard = std::time::Instant::now();
+            return true;
+        }
+        false
+    }
 }
 
 impl core::model::Progress for PyProgress {
     fn on_progress(&self, current: usize, total: usize, message: &str) {
+        if !self.should_emit(current, total) {
+            return;
+        }
         // detach 期间没有 GIL：重新 attach 后调用 Python 回调。
         Python::attach(|py| {
-            if let Ok(obj) = self.callback.bind(py).call1((current, total, message)) {
-                // 回调返回值不用；异常不让它穿过 Rust 边界（记录即可）
-                let _ = obj;
+            let cb = self.callback.bind(py);
+            if let Err(err) = cb.call1((current, total, message)) {
+                // PyErr 没有 Drop 上报机制，直接丢弃会彻底静默。用
+                // write_unraisable 打到 sys.unraisablehook / stderr，至少留痕，
+                // 且不让异常穿过 Rust 边界中断文件搬运。
+                err.write_unraisable(py, Some(&cb));
             }
         });
     }
@@ -136,7 +173,7 @@ impl core::model::Progress for NoProgress {
 
 fn progress_obj(callback: Option<Py<PyAny>>) -> Box<dyn core::model::Progress> {
     match callback {
-        Some(cb) => Box::new(PyProgress { callback: cb }),
+        Some(cb) => Box::new(PyProgress::new(cb)),
         None => Box::new(NoProgress),
     }
 }
@@ -206,6 +243,19 @@ fn build_plan(py: Python<'_>, options: Option<&Bound<'_, PyAny>>,
     json_to_py(py, &result)
 }
 
+/// 停止注册表条目的 RAII 清理：即使 `core::execute::execute` panic 被
+/// `shim::guard` 兜住，Drop 也会把 task_id 从全局表移除，避免条目永久残留。
+struct StopGuard {
+    task_id: String,
+}
+impl Drop for StopGuard {
+    fn drop(&mut self) {
+        if !self.task_id.is_empty() {
+            core::execute::clear_stop(&self.task_id);
+        }
+    }
+}
+
 /// 执行 / 模拟运行。返回 dict（含 items / 统计 / 日志路径）。
 #[pyfunction]
 #[pyo3(signature = (options, plan, dry_run = false, task_id = "", progress = None))]
@@ -215,19 +265,19 @@ fn execute(py: Python<'_>, options: Option<&Bound<'_, PyAny>>, plan: Option<&Bou
     let plan_val = plan_from_py(plan)?;
     let cb: Option<Py<PyAny>> = progress;
     let tid = task_id.to_string();
+    // 注册停止标志必须在 py.detach 之前完成：界面在提交任务时就启用了「停止」，
+    // 若等后台线程真正跑起来才注册，用户抢先点的那一下会查表为空、永久丢失。
+    let stop = if tid.is_empty() {
+        Arc::new(core::model::StopFlag::new())
+    } else {
+        core::execute::register_stop(&tid)
+    };
+    let _guard = StopGuard { task_id: tid.clone() };
     let result = shim::guard(|| {
         py.detach(|| {
-            let stop = if tid.is_empty() {
-                Arc::new(core::model::StopFlag::new())
-            } else {
-                core::execute::register_stop(&tid)
-            };
             let p = progress_obj(cb);
             let out = core::execute::execute(&opts, &plan_val, dry_run, &stop, p.as_ref())
                 .map_err(to_pyerr);
-            if !tid.is_empty() {
-                core::execute::clear_stop(&tid);
-            }
             PyResult::Ok(out?)
         })
     })?;
@@ -275,7 +325,10 @@ fn undo_path(py: Python<'_>, log_path: &str,
 /// 列出撤销日志摘要（最新在前）。坏日志跳过。
 #[pyfunction]
 fn list_logs(py: Python<'_>, program_root: &str) -> PyResult<Py<PyAny>> {
-    let rows = core::rollback::list_logs(program_root);
+    let root = program_root.to_string();
+    // 全量读 + 反序列化所有日志可能很慢（日志永不删除），必须释放 GIL，
+    // 否则后台线程长期占着 GIL，主线程界面会冻结。
+    let rows = shim::guard(|| py.detach(|| PyResult::Ok(core::rollback::list_logs(&root))))?;
     let list = PyList::empty(py);
     for (path, log) in rows {
         let d = PyDict::new(py);
@@ -301,21 +354,31 @@ fn list_logs(py: Python<'_>, program_root: &str) -> PyResult<Py<PyAny>> {
 /// 读取单份日志全文（界面「日志详情」用）。坏日志抛 ValueError。
 #[pyfunction]
 fn read_log(py: Python<'_>, log_path: &str) -> PyResult<Py<PyAny>> {
-    let text = std::fs::read_to_string(log_path)
-        .map_err(|e| PyOSError::new_err(e.to_string()))?;
-    let log: core::model::RollbackLog = serde_json::from_str(&text)
-        .map_err(|e| PyValueError::new_err(format!("日志无法解析：{e}")))?;
+    let path = std::path::PathBuf::from(log_path);
+    let log = shim::guard(|| {
+        py.detach(|| {
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| PyOSError::new_err(e.to_string()))?;
+            let log: core::model::RollbackLog = serde_json::from_str(&text)
+                .map_err(|e| PyValueError::new_err(format!("日志无法解析：{e}")))?;
+            PyResult::Ok(log)
+        })
+    })?;
     json_to_py(py, &log)
 }
 
 /// 导出 CSV（UTF-8 BOM）。`items` 是计划项或执行结果项列表。
 #[pyfunction]
-fn export_csv(path: &str, items: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+fn export_csv(py: Python<'_>, path: &str, items: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
     let list: Vec<core::model::PlanItem> = match items {
         Some(o) => value_to_type(to_value(o))?,
         None => Vec::new(),
     };
-    wrap(core::csv::export_to_path(&list, &PathBuf::from(path)))
+    let out = PathBuf::from(path);
+    // 大清单的 CSV 拼装与写盘可能耗时，释放 GIL 免得卡住界面。
+    shim::guard(|| {
+        py.detach(|| wrap(core::csv::export_to_path(&list, &out)))
+    })
 }
 
 /// 统计一份计划（界面摘要条用，避免界面自己数数）。

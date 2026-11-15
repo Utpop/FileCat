@@ -233,9 +233,13 @@ def filter_items(items: List[Dict[str, Any]], text: str) -> List[Dict[str, Any]]
         return list(items)
     out = []
     for it in items:
-        hay = " ".join(str(it.get(k) or "") for k in
-                       ("name", "source", "source_dir", "target", "status", "message"))
-        if q in hay.lower():
+        st = str(it.get("status") or "pending")
+        # 界面显示的是中文状态文案，用户按「完成 / 跳过」筛选也要能命中；
+        # 同时保留原始英文码，按「done」搜仍然有效。
+        parts = [str(it.get(k) or "") for k in
+                 ("name", "source", "source_dir", "target", "target_dir", "message")]
+        parts.extend((st, status_text(st)))
+        if q in " ".join(parts).lower():
             out.append(it)
     return out
 

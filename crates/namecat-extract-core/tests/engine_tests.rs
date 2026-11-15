@@ -226,12 +226,21 @@ fn overwrite_requires_confirmation_and_backs_up() {
     write(&root, "sub/same.txt", "NEW");
     let mut o = opts(&s, e::ExtractMode::Flatten, e::ConflictPolicy::Overwrite);
     o.overwrite_confirmed = false;
-    assert!(e::plan::build_plan(&o).is_err(), "未确认必须拒绝");
+    // 计划生成是只读预览，不应被「尚未确认」拦住（用户得先看到覆盖清单）。
+    let plan = e::plan::build_plan(&o).unwrap_or_else(|err| {
+        panic!("覆盖预览不应要求确认：{err}")
+    });
+    assert!(plan.items.iter().any(|i| i.overwritten), "应标出将被覆盖的项");
+    // 真正写盘时才强制要求确认：模拟运行零写入，允许；真实执行未确认必须拒绝。
+    let stop = e::StopFlag::new();
+    assert!(e::execute::execute(&o, &plan, false, &stop, &Silent).is_err(),
+            "真实执行未确认必须拒绝");
+    let sim = e::execute::execute(&o, &plan, true, &stop, &Silent).unwrap();
+    assert!(sim.dry_run, "模拟运行不受确认位限制");
     o.overwrite_confirmed = true;
     let plan = e::plan::build_plan(&o).unwrap();
     let it = plan.items.iter().find(|i| i.overwritten).unwrap();
     assert_eq!(it.status, e::FileStatus::Ready);
-    let stop = e::StopFlag::new();
     let res = e::execute::execute(&o, &plan, false, &stop, &Silent).unwrap();
     assert_eq!(res.succeeded, 1);
     assert_eq!(fs::read_to_string(root.join("same.txt")).unwrap(), "NEW");
@@ -357,6 +366,183 @@ fn log_schema_and_atomic_write() {
     assert!(dir.join("backups").is_dir());
     let logs = e::rollback::list_logs(&s.program_root());
     assert_eq!(logs.len(), 1);
+}
+
+// --------------------------------------------------------------------------- //
+// 3.0.1 回归：覆盖策略 / 计划重入 / 空日志 / 崩溃检查点
+// --------------------------------------------------------------------------- //
+
+#[test]
+fn overwrite_multiple_sources_keep_unique_targets_and_undo_restores() {
+    let s = Sandbox::new("overwrite_multi");
+    let root = s.root();
+    write(&root, "a.txt", "OLD");
+    write(&root, "s1/a.txt", "ONE");
+    write(&root, "s2/a.txt", "TWO");
+    let o = opts(&s, e::ExtractMode::Flatten, e::ConflictPolicy::Overwrite);
+    let plan = e::plan::build_plan(&o).unwrap();
+    // 同一个目标只允许第一个源覆盖，其余必须自动改名
+    let ow: Vec<_> = plan.items.iter().filter(|i| i.overwritten).collect();
+    assert_eq!(ow.len(), 1, "覆盖项必须唯一：{:?}",
+               plan.items.iter().map(|i| (i.name.as_str(), i.overwritten, i.target.clone())).collect::<Vec<_>>());
+    let mut targets: Vec<_> = plan.items.iter()
+        .filter(|i| i.status != e::FileStatus::Skip)
+        .map(|i| i.target.clone()).collect();
+    targets.sort();
+    targets.dedup();
+    assert_eq!(targets.len(), plan.items.iter().filter(|i| i.status != e::FileStatus::Skip).count(),
+               "本批次目标必须两两不同");
+    let stop = e::StopFlag::new();
+    let res = e::execute::execute(&o, &plan, false, &stop, &Silent).unwrap();
+    // 根目录 a.txt 是 Skip（已在目标位置），只有 s1/s2 两个源需要搬运
+    assert_eq!(res.succeeded, 2, "两个子目录源都应成功落位：{:?}", res.errors);
+    // OLD 在备份里，ONE/TWO 各占一个独立目标名，谁都没被悄悄吃掉
+    let backups = s.rollback().join(e::model::BACKUP_SUBDIR);
+    assert_eq!(fs::read_dir(&backups).unwrap().flatten().count(), 1);
+    let undo = e::rollback::undo_latest(&s.program_root(), &Silent).unwrap();
+    assert!(undo.complete && undo.failed == 0 && undo.skipped == 0,
+            "撤销应完全成功：{:?}", undo.errors);
+    assert_eq!(undo.succeeded, 2);
+    assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "OLD");
+    assert_eq!(fs::read_to_string(root.join("s1").join("a.txt")).unwrap(), "ONE");
+    assert_eq!(fs::read_to_string(root.join("s2").join("a.txt")).unwrap(), "TWO");
+}
+
+#[test]
+fn reexecuted_plan_is_rejected_without_second_log() {
+    let s = Sandbox::new("reexec");
+    let root = s.root();
+    write(&root, "a/f.txt", "F");
+    let o = opts(&s, e::ExtractMode::Flatten, e::ConflictPolicy::Rename);
+    let plan = e::plan::build_plan(&o).unwrap();
+    let stop = e::StopFlag::new();
+    assert!(e::execute::execute(&o, &plan, false, &stop, &Silent).is_ok());
+    let before = e::rollback::list_logs(&s.program_root()).len();
+    assert_eq!(before, 1);
+    // 拿同一份 plan 再跑：必须拒绝，且不能多出一份空日志
+    assert!(e::execute::execute(&o, &plan, false, &stop, &Silent).is_err(),
+            "已执行过的计划必须拒绝重跑");
+    assert_eq!(e::rollback::list_logs(&s.program_root()).len(), before,
+               "拒绝重跑不得产生新日志");
+    // GUI 把执行结果（DryRun/Done）回传成 plan 时同样要拦住
+    let mut stale = plan.clone();
+    stale.items[0].status = e::FileStatus::Done;
+    assert!(e::execute::execute(&o, &stale, true, &stop, &Silent).is_err());
+}
+
+#[test]
+fn empty_execution_writes_no_log_and_undo_skips_empty_record() {
+    let s = Sandbox::new("empty_log");
+    let root = s.root();
+    write(&root, "a.txt", "A"); // 根目录已就位 → 计划里只有 Skip
+    let o = opts(&s, e::ExtractMode::Flatten, e::ConflictPolicy::Rename);
+    let plan = e::plan::build_plan(&o).unwrap();
+    assert!(plan.items.iter().all(|i| i.status == e::FileStatus::Skip));
+    let stop = e::StopFlag::new();
+    let res = e::execute::execute(&o, &plan, false, &stop, &Silent).unwrap();
+    assert!(res.log_path.is_none(), "零写入执行不得生成撤销日志");
+    assert_eq!(e::rollback::list_logs(&s.program_root()).len(), 0);
+    // 即便历史里已经存在一份 0 条目日志，undo_latest 也不该把它当成目标
+    let dir = e::rollback::prepare_log(&o).unwrap().0;
+    let _ = dir;
+    let undo = e::rollback::undo_latest(&s.program_root(), &Silent).unwrap();
+    assert!(!undo.complete, "没有可撤销记录时应明确报告，而不是「撤销完成」");
+}
+
+#[test]
+fn checkpoint_recovers_entries_after_crash() {
+    let s = Sandbox::new("crash");
+    let root = s.root();
+    write(&root, "a/f.txt", "F");
+    let o = opts(&s, e::ExtractMode::Flatten, e::ConflictPolicy::Rename);
+    let (_dir, _op_id, path) = e::rollback::prepare_log(&o).unwrap();
+    let mut log = e::model::RollbackLog {
+        schema: e::model::SCHEMA,
+        app: "FileCat".into(),
+        operation_id: "crash".into(),
+        time: "2026-01-01 00:00:00".into(),
+        root: root.clone(),
+        mode: e::ExtractMode::Flatten,
+        conflict: e::ConflictPolicy::Rename,
+        dry_run: false,
+        result: "running".into(),
+        state: e::model::RollbackState::Active,
+        entries: Vec::new(),
+        cleaned_dirs: Vec::new(),
+        errors: Vec::new(),
+    };
+    let entry = e::model::RollbackEntry {
+        index: 0,
+        source: root.join("a").join("f.txt"),
+        target: root.join("f.txt"),
+        size: 1,
+        status: e::FileStatus::Done,
+        message: "已完成".into(),
+        renamed: false,
+        overwritten: false,
+        backup: None,
+        source_mtime: 0,
+        target_mtime: 0,
+    };
+    // 模拟「文件已搬走、正式日志还没 finalize」的崩溃点
+    let mut writer = e::rollback::PendingWriter::open(&path).unwrap();
+    e::rollback::checkpoint(&mut writer, &mut log, entry, &[], &[]).unwrap();
+    drop(writer);
+    // list_logs 是纯只读：把 .pending 合成进内存供展示，但不写回日志，
+    // 否则执行中刷新日志页会固化不完整状态、后续成功项永远不再被合成。
+    let logs = e::rollback::list_logs(&s.program_root());
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].1.entries.len(), 1, "崩溃后应能从检查点恢复成功项");
+    assert_eq!(logs[0].1.result, "running");
+    // 真正要撤销时才做恢复并原子写回完整日志
+    let _ = e::rollback::undo_latest(&s.program_root(), &Silent).unwrap();
+    let logs2 = e::rollback::list_logs(&s.program_root());
+    assert_ne!(logs2[0].1.result, "running",
+               "undo_one 应把检查点恢复结果落盘，不再停留在 running");
+}
+
+#[test]
+fn undo_partial_keeps_skipped_entries_for_retry() {
+    let s = Sandbox::new("undo_partial");
+    let root = s.root();
+    write(&root, "a/f.txt", "F");
+    let o = opts(&s, e::ExtractMode::Flatten, e::ConflictPolicy::Rename);
+    let plan = e::plan::build_plan(&o).unwrap();
+    let stop = e::StopFlag::new();
+    e::execute::execute(&o, &plan, false, &stop, &Silent).unwrap();
+    // 把目标文件临时移走，制造「目标已不存在，跳过」
+    let moved = root.join("moved_away.txt");
+    fs::rename(root.join("f.txt"), &moved).unwrap();
+    let first = e::rollback::undo_latest(&s.program_root(), &Silent).unwrap();
+    assert_eq!(first.skipped, 1, "目标缺失应跳过");
+    // 关键：跳过的条目必须留在日志里，否则重入时它已消失、文件永远撤不回
+    let logs = e::rollback::list_logs(&s.program_root());
+    assert_eq!(logs[0].1.entries.len(), 1, "跳过的条目不得从日志里丢失");
+    assert_eq!(logs[0].1.state, e::RollbackState::Partial);
+    // 用户把文件放回后再次撤销，应能成功
+    fs::rename(&moved, root.join("f.txt")).unwrap();
+    let second = e::rollback::undo_latest(&s.program_root(), &Silent).unwrap();
+    assert_eq!(second.succeeded, 1, "重入后应能恢复：{:?}", second.errors);
+    assert!(root.join("a").join("f.txt").is_file());
+}
+
+#[test]
+fn forged_plan_with_out_of_root_target_is_rejected() {
+    let s = Sandbox::new("forged_plan");
+    let root = s.root();
+    write(&root, "a/f.txt", "F");
+    let o = opts(&s, e::ExtractMode::Flatten, e::ConflictPolicy::Rename);
+    let mut plan = e::plan::build_plan(&o).unwrap();
+    // 伪造一份「目标指向扫描根之外」的计划（外部 JSON 输入无需签名）
+    plan.items[0].target = PathBuf::from(r"C:\\Windows\\System32\\evil.txt");
+    plan.items[0].overwritten = true;
+    let stop = e::StopFlag::new();
+    assert!(e::execute::execute(&o, &plan, false, &stop, &Silent).is_err(),
+            "越界目标必须被拒绝，不能触发任意路径删除");
+    // 冲突策略与选项不一致也要拒绝
+    let mut plan2 = e::plan::build_plan(&o).unwrap();
+    plan2.conflict = e::ConflictPolicy::Overwrite;
+    assert!(e::execute::execute(&o, &plan2, false, &stop, &Silent).is_err());
 }
 
 #[test]

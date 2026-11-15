@@ -41,6 +41,8 @@ class ExtractPage(QWidget):
         self.bundle: Optional[EA.ExtractBundle] = None
         self._busy = False
         self._task_id = ""
+        self._task_kind = ""
+        self._task_seq = 0
         self._collapsed = False
         self.runner = W.TaskRunner(self, max_threads=1)
 
@@ -82,6 +84,7 @@ class ExtractPage(QWidget):
         pick.setToolTip("选择目标文件夹（也是扫描根目录）")
         pick.clicked.connect(self._pick)
         row.addWidget(pick)
+        self.btn_pick = pick
         self.btn_scan = Button("扫描预览", "scan", "cta", icon_px=16)
         self.btn_scan.setToolTip("按当前选项生成提取计划（只读，不改动文件）")
         self.btn_scan.clicked.connect(self.scan)
@@ -266,17 +269,26 @@ class ExtractPage(QWidget):
         return card
 
     # ---------------- 表单事件 ----------------
+    def _form_busy(self) -> bool:
+        """后台任务在跑时忽略一切表单改动：否则扫描中改路径会让
+        _scan_done 把旧目录的结果回填到新路径上，随后执行就会搬错文件。"""
+        return bool(self._busy)
+
     def _on_root_changed(self):
+        if self._form_busy():
+            return
         self.state.root = self.path.text()
-        self.bundle = None
         self._mark_dirty("目录已改动，请重新扫描预览")
-        self._refresh_ui()
 
     def _on_mode(self, value):
+        if self._form_busy():
+            return
         self.state.mode = value
         self._mark_dirty()
 
     def _on_depth(self, value):
+        if self._form_busy():
+            return
         try:
             self.state.max_depth = max(0, int(value))
         except ValueError:
@@ -284,6 +296,8 @@ class ExtractPage(QWidget):
         self._mark_dirty()
 
     def _on_conflict(self, value):
+        if self._form_busy():
+            return
         self.state.conflict = value
         self.state.overwrite_confirmed = False
         note = EA.danger_note(value)
@@ -292,10 +306,14 @@ class ExtractPage(QWidget):
         self._mark_dirty()
 
     def _on_clean(self, on):
+        if self._form_busy():
+            return
         self.state.clean_empty_dirs = bool(on)
         self._mark_dirty()
 
     def _on_excludes(self):
+        if self._form_busy():
+            return
         self.state.exclude_dirs = self.ed_dirs.text()
         self.state.exclude_exts = self.ed_exts.text()
         self._mark_dirty()
@@ -304,6 +322,9 @@ class ExtractPage(QWidget):
         self._refresh_table()
 
     def _mark_dirty(self, message: str = "选项已改动，请重新扫描预览"):
+        # 任何配置变动都撤销「覆盖已确认」：确认只针对当前这一次计划，
+        # 绝不能残留到换目录 / 重扫 / 后续会话里造成静默覆盖。
+        self.state.overwrite_confirmed = False
         self.bundle = None
         self.status.message(message, "info")
         self._refresh_ui()
@@ -337,26 +358,57 @@ class ExtractPage(QWidget):
         except OSError as exc:
             QMessageBox.warning(None, "打不开", str(exc))
 
+    # ---------------- 任务提交（唯一收口） ----------------
+    def _start_task(self, kind, task, on_done, label, total):
+        """统一防重入、登记任务类型与唯一 task_id、连线并置忙。
+
+        过去 scan() 用 runner.busy()、_run() 用 has_plan、undo() 用 runner.busy()，
+        三者口径不一致；而 QRunnable 的 done 回调是 queued 到主线程的，线程
+        刚回收到回调执行前那一小段窗口里 runner.busy() 已经是 False，用户能
+        再提交一个任务，两个回调互相覆盖 bundle。这里一律以 self._busy 为准。
+        """
+        if self._busy:
+            return False
+        self._task_kind = kind
+        # 每次任务用唯一 id，避免旧任务的停止标志被 stop() 误置 / 被新任务覆盖
+        self._task_id = "extract_%s_%d" % (kind, self._task_seq)
+        self._task_seq += 1
+        self._busy_set(True, label, 0, total)
+        task.signals.done.connect(on_done)
+        task.signals.failed.connect(self._task_failed)
+        task.signals.progress.connect(self._on_progress)
+        # 兜底：done 槽若自己抛异常（结构异常数据），_busy 会永远停在 True、
+        # 所有按钮被禁用。finished 必达，这里检测并强制收尾。
+        task.signals.finished.connect(self._task_finished_guard)
+        self.runner.submit(task)
+        return True
+
+    def _task_finished_guard(self):
+        if self._busy:
+            self.status.message("任务已结束但界面未收到结果，请重新扫描预览", "warn")
+            self.bundle = None
+            self._task_id = ""
+            self._task_kind = ""
+            self._busy_set(False, "已结束", 0, 0)
+
     # ---------------- 扫描 ----------------
     def scan(self):
-        if self.runner.busy():
+        if self._busy:
             return
         if not self.state.root or not os.path.isdir(self.state.root):
             self.status.message("请先选择一个存在的目标文件夹", "warn")
             return
-        self._busy_set(True, "正在扫描目录…", 0, 0)
-        task = W.extract_plan_task(self.state)
-        task.signals.done.connect(self._scan_done)
-        task.signals.failed.connect(self._task_failed)
-        task.signals.progress.connect(self._on_progress)
-        self.runner.submit(task)
+        # 每次扫描都是一份新计划，覆盖确认必须重新做
+        self.state.overwrite_confirmed = False
+        self._start_task("scan", W.extract_plan_task(self.state),
+                         self._scan_done, "正在扫描目录…", 0)
 
     def _scan_done(self, bundle):
         self.bundle = bundle
         stats = bundle.stats()
         err = int(bundle.plan.get("error_count") or 0)
-        # 与工作台同款：正常扫完走 done()（绿勾 + 5 秒淡回灰色），
-        # 有目录读取异常才改成消息态停留，便于用户看见问题。
+        # 先落 bundle 再 done()：StatusSlot 的 count_provider 读的就是它，
+        # 顺序反了会显示「已扫描 0 项」。
         if err:
             self.status.message("扫描完成 %d 项 · 目录读取异常 %d 处"
                                 % (stats["total"], err), "warn")
@@ -379,28 +431,51 @@ class ExtractPage(QWidget):
                     "可通过「撤销上次」恢复。\n\n确定继续吗？",
                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
                 return
+            # 确认必须同时落在表单与本次 options 上：只写 options 的话，
+            # 之后任何一次 to_options() 重新生成都会把确认位丢掉。
             self.state.overwrite_confirmed = True
-            # 确认状态要同步进 options，否则引擎会拒绝
             if self.bundle is not None:
                 self.bundle.options["overwrite_confirmed"] = True
+                self.bundle.state = self.state
         self._run(False)
 
     def _run(self, dry_run: bool):
-        if self.runner.busy() or self.bundle is None or not self.bundle.has_plan:
+        if self._busy or self.bundle is None or not self.bundle.has_plan:
             return
-        self._task_id = "extract_%s" % ("dry" if dry_run else "real")
+        kind = "dry" if dry_run else "exec"
+        task_id = "extract_%s_%d" % (kind, self._task_seq)
+        self._task_seq += 1
+        self._task_kind = kind
+        self._task_id = task_id
         self._busy_set(True, "模拟运行中…" if dry_run else "正在提取文件…", 0,
                        len(self.bundle.items))
-        task = W.extract_execute_task(self.bundle, dry_run, self._task_id)
+        task = W.extract_execute_task(self.bundle, dry_run, task_id)
         task.signals.done.connect(self._exec_done)
         task.signals.failed.connect(self._task_failed)
         task.signals.progress.connect(self._on_progress)
+        task.signals.finished.connect(self._task_finished_guard)
         self.runner.submit(task)
 
     def _exec_done(self, bundle):
-        self.bundle = bundle
         r = bundle.result or {}
-        st = bundle.stats()
+        # 预览即承诺：真实执行后这份 plan 已经消费掉，不能再拿它执行一次。
+        # 只保留 result（清单、胶囊、CSV 仍展示本次结果），把 plan 置空后
+        # has_plan=False，「开始提取 / 模拟运行」随即禁用，用户必须重新扫描。
+        # 否则重复点「开始提取」会对已搬走的文件全部报错，并额外生成一份
+        # 空撤销日志，把真正那份日志挤到「撤销上次」永远够不着的位置。
+        # 模拟运行零写入，不消费计划：用户演练完应能直接点「开始提取」。
+        if r.get("dry_run"):
+            self.bundle = bundle
+        else:
+            # 真实执行收尾后立刻撤销覆盖确认：确认只针对「这一次」计划，
+            # 不能残留到后续重扫 / 换目录（_mark_dirty / scan 也会复位，这里
+            # 再兜一道，覆盖从执行结束到重扫之间的窗口）。
+            self.state.overwrite_confirmed = False
+            bundle.options["overwrite_confirmed"] = False
+            self.bundle = EA.ExtractBundle(
+                options=bundle.options, plan=None, result=bundle.result,
+                state=bundle.state)
+        st = self.bundle.stats()
         if r.get("dry_run"):
             tone, text = "success", "模拟运行完成：未修改任何文件、目录或日志"
         elif r.get("stopped"):
@@ -424,15 +499,22 @@ class ExtractPage(QWidget):
         # （用户想看磁盘现状可点「扫描预览」）。
 
     def stop(self):
-        if not self._busy or not self._task_id:
+        if not self._busy:
+            return
+        # 扫描与撤销没有注册停止标志（引擎侧没有安全中断点），如实告诉用户，
+        # 不要再对旧 task_id 发一个永远不生效的请求、还显示「正在停止…」。
+        if self._task_kind not in ("dry", "exec") or not self._task_id:
+            self.status.message("当前阶段（扫描 / 撤销）不可中途停止，请等待完成", "warn")
             return
         if EA.stop_task(self._task_id):
             self.prog_label.setText("正在停止…当前文件操作完成后结束")
             self.btn_stop.setEnabled(False)
+        else:
+            self.status.message("任务已结束或尚未开始，无需停止", "info")
 
     # ---------------- 撤销 ----------------
     def undo(self):
-        if self.runner.busy():
+        if self._busy:
             return
         note = ("从固定目录 %s 读取最新一份有效提取记录并还原。\n\n"
                 "只撤销实际执行成功的项；目标被后续修改或原位置已有文件时跳过并报告，"
@@ -441,12 +523,8 @@ class ExtractPage(QWidget):
                                 QMessageBox.Yes | QMessageBox.No,
                                 QMessageBox.No) != QMessageBox.Yes:
             return
-        self._busy_set(True, "正在撤销…", 0, 0)
-        task = W.extract_undo_task()
-        task.signals.done.connect(self._undo_done)
-        task.signals.failed.connect(self._task_failed)
-        task.signals.progress.connect(self._on_progress)
-        self.runner.submit(task)
+        self._start_task("undo", W.extract_undo_task(), self._undo_done,
+                         "正在撤销…", 0)
 
     def _undo_done(self, result):
         r = result or {}
@@ -461,8 +539,11 @@ class ExtractPage(QWidget):
         self.status.message(text, "success" if complete else "warn")
         self.status_message.emit(text)
         self._busy_set(False, "撤销结束", 0, 0)
-        # 撤销改了磁盘：旧清单失效，提示重新扫描
+        # 撤销改了磁盘：旧清单失效。状态槽回到灰色 idle 并提示重扫，
+        # 不要让它一直停在绿色的「撤销完成」上（count_provider 已经是 0）。
         self.bundle = None
+        self.status.idle()
+        self.status.message("撤销后清单已清空，请点「扫描预览」按磁盘现状重建", "info")
         self._refresh_ui()
 
     # ---------------- CSV ----------------
@@ -485,6 +566,10 @@ class ExtractPage(QWidget):
 
     # ---------------- 后台回调 ----------------
     def _on_progress(self, cur, total, text):
+        # 任务已结束后仍可能有排队中的 progress 信号到达，别把「完成 / 失败」
+        # 文案覆盖回「正在提取…」。
+        if not self._busy:
+            return
         if total:
             self.progress.setMaximum(int(total))
             self.progress.setValue(min(int(cur), int(total)))
@@ -493,7 +578,12 @@ class ExtractPage(QWidget):
     def _task_failed(self, message):
         self.status.message("操作失败：%s" % message, "error")
         self.status_message.emit("操作失败")
-        self._busy_set(False, "失败", 0, 0)
+        # 失败后旧清单/旧计划一律作废：执行阶段抛异常时若留着 has_plan=True，
+        # 「开始提取」会对同一份过期计划再次点击（引擎会拒绝，但界面误导）。
+        self.bundle = None
+        self._task_id = ""
+        self._task_kind = ""
+        self._busy_set(False, "失败 · 请重新扫描预览", 0, 0)
 
     def _busy_set(self, busy: bool, label: str, cur: int, total: int):
         self._busy = busy
@@ -511,43 +601,46 @@ class ExtractPage(QWidget):
         items = self.bundle.items if self.bundle else []
         items = EA.filter_items(items, self.ed_filter.text())
         self.tree.setUpdatesEnabled(False)
-        self.tree.clear()
-        if not items:
-            self.tree.hide()
-            self.empty.show()
-            self.tree.setUpdatesEnabled(True)
-            return
-        self.empty.hide()
-        self.tree.show()
+        try:
+            self.tree.clear()
+            if not items:
+                self.tree.hide()
+                self.empty.show()
+                return
+            self.empty.hide()
+            self.tree.show()
 
-        # 按目标目录分组
-        groups: Dict[str, List[dict]] = {}
-        for it in items:
-            groups.setdefault(EA.group_key(it), []).append(it)
-        root = self.state.root
-        for gkey in sorted(groups.keys()):
-            group = QTreeWidgetItem(self.tree)
-            group.setText(0, "%s  (%d)" % (EA.relative_dir(gkey, root), len(groups[gkey])))
-            group.setFont(0, F(12, 600))
-            group.setForeground(0, QColor(C["t1"]))
-            group.setBackground(0, QColor(C["s1"]))
-            group.setFirstColumnSpanned(True)
-            group.setExpanded(not self._collapsed)
-            for it in groups[gkey]:
-                row = QTreeWidgetItem(group)
-                row.setText(0, str(it.get("name") or ""))
-                row.setText(1, EA.relative_dir(str(it.get("source_dir") or ""), root))
-                row.setText(2, str(it.get("source") or ""))
-                row.setText(3, str(it.get("target") or ""))
-                row.setText(4, EA.human_size(it.get("size") or 0))
-                st = str(it.get("status") or "pending")
-                row.setText(5, EA.status_text(st))
-                row.setText(6, str(it.get("message") or ""))
-                row.setToolTip(2, str(it.get("source") or ""))
-                row.setToolTip(3, str(it.get("target") or ""))
-                row.setToolTip(6, str(it.get("message") or ""))
-                row.setForeground(5, QColor(C[EA.status_color(st)]))
-        self.tree.setUpdatesEnabled(True)
+            # 按目标目录分组
+            groups: Dict[str, List[dict]] = {}
+            for it in items:
+                groups.setdefault(EA.group_key(it), []).append(it)
+            root = self.state.root
+            for gkey in sorted(groups.keys()):
+                group = QTreeWidgetItem(self.tree)
+                group.setText(0, "%s  (%d)" % (EA.relative_dir(gkey, root), len(groups[gkey])))
+                group.setFont(0, F(12, 600))
+                group.setForeground(0, QColor(C["t1"]))
+                group.setBackground(0, QColor(C["s1"]))
+                group.setFirstColumnSpanned(True)
+                group.setExpanded(not self._collapsed)
+                for it in groups[gkey]:
+                    row = QTreeWidgetItem(group)
+                    row.setText(0, str(it.get("name") or ""))
+                    row.setText(1, EA.relative_dir(str(it.get("source_dir") or ""), root))
+                    row.setText(2, str(it.get("source") or ""))
+                    row.setText(3, str(it.get("target") or ""))
+                    row.setText(4, EA.human_size(it.get("size") or 0))
+                    st = str(it.get("status") or "pending")
+                    row.setText(5, EA.status_text(st))
+                    row.setText(6, str(it.get("message") or ""))
+                    row.setToolTip(2, str(it.get("source") or ""))
+                    row.setToolTip(3, str(it.get("target") or ""))
+                    row.setToolTip(6, str(it.get("message") or ""))
+                    row.setForeground(5, QColor(C[EA.status_color(st)]))
+        finally:
+            # 渲染中途异常（坏数据 / 未知状态色）也必须恢复刷新，
+            # 否则整棵 QTreeWidget 会永久停更，用户以为程序卡死。
+            self.tree.setUpdatesEnabled(True)
 
     def _toggle_collapse(self):
         self._collapsed = not self._collapsed
@@ -565,18 +658,27 @@ class ExtractPage(QWidget):
     # ---------------- 控件启用状态（单一收口） ----------------
     def _refresh_ui(self):
         has_plan = self.bundle is not None and self.bundle.has_plan
+        idle = not self._busy
         stats = self.bundle.stats() if self.bundle else {}
         for key, chip in self.chips.items():
             chip.set_value(int(stats.get(key, 0)))
-        self.btn_scan.setEnabled(not self._busy)
-        self.btn_dry.setEnabled(has_plan and not self._busy)
-        self.btn_apply.setEnabled(has_plan and not self._busy)
-        self.btn_stop.setEnabled(self._busy)
-        self.btn_csv.setEnabled(bool(self.bundle and self.bundle.items) and not self._busy)
-        self.btn_undo.setEnabled(not self._busy)
-        self.btn_open.setEnabled(bool(self.state.root))
-        self.btn_collapse.setEnabled(has_plan)
-        self.btn_expand.setEnabled(has_plan)
+        self.btn_scan.setEnabled(idle)
+        self.btn_dry.setEnabled(has_plan and idle)
+        self.btn_apply.setEnabled(has_plan and idle)
+        # 只有模拟/执行阶段有可中断点；扫描与撤销没有，别给一个假停止按钮。
+        self.btn_stop.setEnabled(self._busy and self._task_kind in ("dry", "exec"))
+        self.btn_csv.setEnabled(bool(self.bundle and self.bundle.items) and idle)
+        self.btn_undo.setEnabled(idle)
+        self.btn_open.setEnabled(bool(self.state.root) and idle)
+        self.btn_logs.setEnabled(idle)
+        self.btn_collapse.setEnabled(has_plan and idle)
+        self.btn_expand.setEnabled(has_plan and idle)
+        # 忙时冻结所有输入：扫描中改目录会让 _scan_done 把旧结果回填到新路径，
+        # 随后执行就会搬错文件；执行中改选项会让回调与表单互相打架。
+        for w in (self.path, self.btn_pick, self.cmb_mode, self.cmb_depth,
+                  self.cmb_conflict, self.cb_clean, self.ed_dirs, self.ed_exts,
+                  self.ed_filter):
+            w.setEnabled(idle)
         self._refresh_table()
 
     def shutdown(self):

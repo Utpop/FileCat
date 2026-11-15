@@ -1,7 +1,32 @@
 //! 公开数据结构。Python 绑定层只做 JSON 互转，不在这里引入任何 Python 类型。
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use std::path::PathBuf;
+
+/// Windows NTFS 允许含未配对 surrogate 的文件名（非 UTF-8）。
+/// `serde_json::to_value` 对 `PathBuf` 默认调用 `to_str()`，遇到这类名字会直接
+/// 报错 —— 而 `execute` 是在**文件已搬完、日志已落盘之后**才做 JSON 转换，
+/// 一失败 Python 就再也拿不到 `log_path`。这里统一用 `to_string_lossy()` 兜底。
+mod path_serde {
+    use super::*;
+    pub fn path<S: Serializer>(p: &PathBuf, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(&p.to_string_lossy())
+    }
+    pub fn opt<S: Serializer>(p: &Option<PathBuf>, s: S) -> std::result::Result<S::Ok, S::Error> {
+        match p {
+            Some(v) => s.serialize_some(&v.to_string_lossy()),
+            None => s.serialize_none(),
+        }
+    }
+    pub fn vec<S: Serializer>(p: &[PathBuf], s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = s.serialize_seq(Some(p.len()))?;
+        for v in p {
+            seq.serialize_element(&v.to_string_lossy())?;
+        }
+        seq.end()
+    }
+}
 
 /// 引擎日志 Schema 版本。结构变化时递增；旧版本仍需可读。
 pub const SCHEMA: u32 = 1;
@@ -192,9 +217,11 @@ impl ExtractOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScannedFile {
     /// 绝对路径。
+    #[serde(serialize_with = "path_serde::path")]
     pub source: PathBuf,
     pub name: String,
     /// 来源目录（绝对路径）。
+    #[serde(serialize_with = "path_serde::path")]
     pub source_dir: PathBuf,
     /// 相对目标根目录的深度：根目录下为 1。
     pub depth: usize,
@@ -206,11 +233,15 @@ pub struct ScannedFile {
 pub struct PlanItem {
     pub index: usize,
     pub name: String,
+    #[serde(serialize_with = "path_serde::path")]
     pub source: PathBuf,
+    #[serde(serialize_with = "path_serde::path")]
     pub source_dir: PathBuf,
     /// 预计/实际目标路径。
+    #[serde(serialize_with = "path_serde::path")]
     pub target: PathBuf,
     /// 目标所在目录（分组用）。
+    #[serde(serialize_with = "path_serde::path")]
     pub target_dir: PathBuf,
     pub size: u64,
     pub depth: usize,
@@ -222,6 +253,7 @@ pub struct PlanItem {
     /// 是否发生覆盖（目标原文件已备份）。
     pub overwritten: bool,
     /// 覆盖前的备份路径（相对 `Rollback_Log`）。
+    #[serde(serialize_with = "path_serde::opt")]
     pub backup: Option<PathBuf>,
 }
 
@@ -234,12 +266,14 @@ impl PlanItem {
 /// 一次扫描的完整计划。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ExtractPlan {
+    #[serde(serialize_with = "path_serde::path")]
     pub root: PathBuf,
     pub mode: ExtractMode,
     pub conflict: ConflictPolicy,
     pub max_depth: usize,
     pub items: Vec<PlanItem>,
     /// 扫描时发现的候选空目录（绝对路径，最深优先）；执行清理时重新验证。
+    #[serde(serialize_with = "path_serde::vec")]
     pub empty_dir_candidates: Vec<PathBuf>,
     pub scanned_count: usize,
     pub excluded_count: usize,
@@ -289,8 +323,10 @@ pub struct ExecResult {
     /// 本次操作唯一 ID；模拟运行为空。
     pub operation_id: String,
     /// 撤销日志绝对路径；模拟运行为空。
+    #[serde(serialize_with = "path_serde::opt")]
     pub log_path: Option<PathBuf>,
     pub items: Vec<PlanItem>,
+    #[serde(serialize_with = "path_serde::vec")]
     pub cleaned: Vec<PathBuf>,
     pub errors: Vec<String>,
 }
@@ -300,7 +336,9 @@ pub struct ExecResult {
 pub struct RollbackEntry {
     /// 执行成功的项在 `items` 里的下标。
     pub index: usize,
+    #[serde(serialize_with = "path_serde::path")]
     pub source: PathBuf,
+    #[serde(serialize_with = "path_serde::path")]
     pub target: PathBuf,
     pub size: u64,
     pub status: FileStatus,
@@ -308,6 +346,7 @@ pub struct RollbackEntry {
     pub renamed: bool,
     pub overwritten: bool,
     /// 覆盖前原目标文件的备份（相对日志目录）。
+    #[serde(serialize_with = "path_serde::opt")]
     pub backup: Option<PathBuf>,
     /// 执行时源文件的 mtime（Windows 100ns ticks，UTC），用于撤销前判断是否被改动。
     pub source_mtime: i64,
@@ -318,6 +357,7 @@ pub struct RollbackEntry {
 /// 目录清理记录。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CleanedDir {
+    #[serde(serialize_with = "path_serde::path")]
     pub path: PathBuf,
     /// 相对日志目录的备份（目录本身不备份，只记结构）。
     pub relative: String,
@@ -340,6 +380,7 @@ pub struct RollbackLog {
     pub app: String,
     pub operation_id: String,
     pub time: String,
+    #[serde(serialize_with = "path_serde::path")]
     pub root: PathBuf,
     pub mode: ExtractMode,
     pub conflict: ConflictPolicy,
@@ -419,3 +460,55 @@ impl Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_stats_counts_statuses() {
+        let mut p = ExtractPlan::default();
+        p.items.push(PlanItem {
+            index: 0, name: "a".into(), source: PathBuf::from("a"),
+            source_dir: PathBuf::from("."), target: PathBuf::from("a"),
+            target_dir: PathBuf::from("."), size: 1, depth: 1,
+            status: FileStatus::Ready, message: String::new(), renamed: false,
+            overwritten: false, backup: None,
+        });
+        assert_eq!(p.stats().total, 1);
+        assert_eq!(p.stats().pending, 1);
+    }
+
+    /// Windows 上 NTFS 允许含未配对 surrogate 的文件名。默认 PathBuf 序列化
+    /// 会因 to_str()==None 直接报错，而 execute 是在文件搬完之后才做 JSON
+    /// 转换的 —— 一失败 Python 就再也拿不到 log_path。这里钉死 lossy 兜底。
+    #[cfg(windows)]
+    #[test]
+    fn non_utf8_paths_serialize_without_error() {
+        use std::os::windows::ffi::OsStringExt;
+        let bad = PathBuf::from(std::ffi::OsString::from_wide(&[0xD800, b'x' as u16]));
+        let item = PlanItem {
+            index: 0, name: "x".into(), source: bad.clone(),
+            source_dir: bad.clone(), target: bad.clone(), target_dir: bad.clone(),
+            size: 1, depth: 1, status: FileStatus::Ready, message: String::new(),
+            renamed: false, overwritten: false, backup: Some(bad.clone()),
+        };
+        let mut plan = ExtractPlan::default();
+        plan.root = bad.clone();
+        plan.empty_dir_candidates.push(bad.clone());
+        plan.items.push(item);
+        let result = ExecResult {
+            log_path: Some(bad.clone()), cleaned: vec![bad.clone()], ..Default::default()
+        };
+        // 任何一处都不能再抛 "path contains invalid UTF-8"
+        assert!(serde_json::to_string(&plan).is_ok());
+        assert!(serde_json::to_string(&result).is_ok());
+        let entry = RollbackEntry {
+            index: 0, source: bad.clone(), target: bad.clone(), size: 1,
+            status: FileStatus::Done, message: String::new(), renamed: false,
+            overwritten: false, backup: Some(bad.clone()), source_mtime: 0,
+            target_mtime: 0,
+        };
+        assert!(serde_json::to_string(&entry).is_ok());
+    }
+}

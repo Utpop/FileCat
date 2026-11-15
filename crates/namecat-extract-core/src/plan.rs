@@ -15,14 +15,90 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// 生成完整提取计划（只扫描 + 计算，不碰文件系统写入）。
+///
+/// 计划生成是只读操作，**不要求** `overwrite_confirmed`：用户需要先看到覆盖
+/// 预览，才可能在真正执行前确认。危险确认只在 `execute` 的真实执行分支校验。
 pub fn build_plan(opts: &ExtractOptions) -> crate::model::Result<ExtractPlan> {
-    if opts.conflict.is_dangerous() && !opts.overwrite_confirmed {
-        return Err(Error::Invalid("覆盖属于危险操作，必须先由用户确认"));
-    }
     let scanned: ScanOutput = scan(opts, None)?;
     let root = PathBuf::from(&opts.root);
     let root = crate::fs::canonical_plain(&root).unwrap_or(root);
     Ok(plan_from_scanned(opts, &root, &scanned))
+}
+
+/// 检查计划是否仍可安全执行（预览即承诺，禁止拿已执行过的计划重跑）。
+///
+/// 计划是从 Python dict 反序列化来的**外部输入**，不能只信任它的字段：
+/// `it.overwritten=true` 会让执行阶段走去 `remove_file(it.target)`，若不校验
+/// 目标位置，一份伪造的 plan 就能删除/搬移任意路径的文件。
+///
+/// - 任一项已经是执行后的终态（Done / DryRun / Stopped）→ 拒绝；
+///   `Error` 是计划阶段自身判定的无效项，不算「已执行」，仍允许提交（会按跳过处理）。
+/// - `plan.root` 必须与 `opts.root` 指向同一目录；`plan.conflict` 必须与 opts 一致。
+/// - 每个 source / target 都必须位于 root 之内，且 target != source。
+/// - `overwritten` 只允许在 Overwrite 策略下为 true；且同一目标最多一个覆盖项。
+pub fn validate_for_execute(
+    plan: &ExtractPlan,
+    opts: &ExtractOptions,
+) -> crate::model::Result<()> {
+    if plan.conflict != opts.conflict {
+        return Err(Error::Invalid("计划的冲突策略与当前选项不一致，请重新扫描预览"));
+    }
+    let root = crate::fs::canonical_plain(Path::new(&opts.root))
+        .unwrap_or_else(|_| PathBuf::from(&opts.root));
+    // plan.root 必须就是本次扫描的根，防止拿 A 目录的计划去 B 目录执行
+    let plan_root = crate::fs::canonical_plain(&plan.root)
+        .unwrap_or_else(|_| plan.root.clone());
+    if norm(&plan_root) != norm(&root) {
+        return Err(Error::Invalid("计划对应的目标文件夹与当前选项不一致，请重新扫描预览"));
+    }
+    // 用组件比较而非字符串前缀：C:\data 不能匹配 C:\data2\...
+    let within = |p: &Path| -> bool {
+        p.starts_with(&root)
+    };
+    let mut overwrite_targets: HashSet<String> = HashSet::new();
+    for it in &plan.items {
+        if matches!(
+            it.status,
+            FileStatus::Done | FileStatus::DryRun | FileStatus::Stopped
+        ) {
+            return Err(Error::Invalid("计划已执行过，请重新扫描预览后再执行"));
+        }
+        if !within(&it.source) || !within(&it.target) {
+            return Err(Error::Invalid("计划中存在超出目标文件夹范围的路径，请重新扫描预览"));
+        }
+        // Skip 项（已在目标位置）本来就是 target == source，属合法计划；
+        // 只有真正要搬运的项才禁止自我搬运。
+        if it.status != FileStatus::Skip && norm(&it.source) == norm(&it.target) {
+            return Err(Error::Invalid("计划中存在源与目标相同的项，请重新扫描预览"));
+        }
+        if it.overwritten && opts.conflict != ConflictPolicy::Overwrite {
+            return Err(Error::Invalid("非覆盖策略的计划里出现了覆盖标记，请重新扫描预览"));
+        }
+        if it.overwritten {
+            let key = norm(&it.target);
+            if !overwrite_targets.insert(key) {
+                return Err(Error::Invalid("覆盖策略下多个文件指向同一目标，请重新扫描或改用自动改名"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 磁盘侧兜底：同一份 plan 对象被重复 `execute` 时，内存状态仍是「未执行」，
+/// 上面的校验拦不住。若**所有**需要搬运的项都已经呈现「源不在、目标在」，
+/// 说明这批文件早已搬完，必须拒绝，否则会生成一份空撤销日志挡住真正的记录。
+pub fn plan_looks_executed(plan: &ExtractPlan) -> bool {
+    let actionable: Vec<&PlanItem> = plan
+        .items
+        .iter()
+        .filter(|it| !matches!(it.status, FileStatus::Skip | FileStatus::Error | FileStatus::Done))
+        .collect();
+    if actionable.is_empty() {
+        return false;
+    }
+    actionable.iter().all(|it| {
+        !crate::fs::file_exists(&it.source) && crate::fs::file_exists(&it.target)
+    })
 }
 
 /// 纯函数版：给定扫描快照算计划，便于单元测试注入数据。
@@ -30,6 +106,12 @@ pub fn plan_from_scanned(opts: &ExtractOptions, root: &Path, scanned: &ScanOutpu
     // 目标占用表：扫描时盘上已有的文件（含被排除的、根目录已就位的），
     // 加上本批次已经规划好的目标。大小写规范化，Windows 语义。
     let mut occupied: HashSet<String> = scanned.existing_files.iter().cloned().collect();
+    // 本批次已经分配出去的目标。与 occupied 分开：occupied 含盘上原有文件，
+    // 覆盖策略下第一个源允许覆盖盘上原文件，但后续源不能再指向同一位置。
+    let mut planned_targets: HashSet<String> = HashSet::new();
+    // 同名文件批量改名时从上次序号继续，避免 O(n²) 重复试 (2)、(3)…
+    let mut name_counters: std::collections::HashMap<(PathBuf, String, String), u64> =
+        std::collections::HashMap::new();
     let mut items = Vec::with_capacity(scanned.files.len());
 
     for (index, f) in scanned.files.iter().enumerate() {
@@ -62,36 +144,58 @@ pub fn plan_from_scanned(opts: &ExtractOptions, root: &Path, scanned: &ScanOutpu
         let mut message = String::new();
 
         if occupied.contains(&key) {
+            // 覆盖策略只允许「第一个」源覆盖盘上原有的同名文件：后续源若也指向
+            // 同一目标，会被反复覆盖，中间源只留在备份里，撤销时两条 entry 指向
+            // 同一个 target 会互相打架（实测会把旧文件搬错位置）。因此后续源一律
+            // 走自动改名兜底，保证每个目标在本批次内唯一。
+            let overwrite_first = opts.conflict == ConflictPolicy::Overwrite
+                && !planned_targets.contains(&key);
             match opts.conflict {
                 ConflictPolicy::Skip => {
                     status = FileStatus::Skip;
                     message = "目标位置已有同名文件，按策略跳过".into();
                 }
-                ConflictPolicy::Overwrite => {
+                ConflictPolicy::Overwrite if overwrite_first => {
                     status = FileStatus::Ready;
                     overwritten = true;
                     message = "危险：将覆盖目标位置已有文件（执行前会备份）".into();
                 }
-                ConflictPolicy::Rename => {
-                    let (new_name, path) = unique_name(&base_dir, &f.name, &occupied);
+                _ => {
+                    // Rename，或 Overwrite 的后续同目标源：生成 name (2).ext
+                    let (stem, ext) = split_name(&f.name);
+                    let key = (base_dir.clone(), stem, ext);
+                    let start = name_counters.get(&key).copied().unwrap_or(2);
+                    let ((new_name, path), used) = unique_name_checked(
+                        &base_dir, &f.name, &occupied, start,
+                        &|p| crate::fs::file_exists(p),
+                    );
+                    name_counters.insert(key, used + 1);
                     target = path;
                     renamed = true;
                     status = FileStatus::Renamed;
-                    message = format!("同名冲突，自动改名为 {}", new_name);
+                    message = if opts.conflict == ConflictPolicy::Overwrite {
+                        format!("同名目标已被前一个文件占用，自动改名为 {}", new_name)
+                    } else {
+                        format!("同名冲突，自动改名为 {}", new_name)
+                    };
                 }
             }
         }
         if status != FileStatus::Skip {
             let final_key = norm(&target);
-            if opts.conflict == ConflictPolicy::Overwrite && overwritten {
-                // 覆盖是有意为之：目标已在盘上属于预期，不进二次冲突校验。
+            if overwritten {
+                // 覆盖是有意为之：目标已在盘上属于预期。这里仍把目标登记进
+                // occupied / planned_targets，后续源才能识别「已被占用」并改名。
                 // 执行阶段会先备份再替换，绝不盲目覆盖。
+                occupied.insert(final_key.clone());
+                planned_targets.insert(final_key);
             } else if occupied.contains(&final_key) {
                 // 二次验证：改名后仍冲突（理论不可达，兜底）
                 status = FileStatus::Error;
                 message = "生成的名称仍然存在冲突".into();
             } else {
-                occupied.insert(final_key);
+                occupied.insert(final_key.clone());
+                planned_targets.insert(final_key);
             }
         }
         items.push(PlanItem {
@@ -149,19 +253,40 @@ pub fn target_dir_for(mode: ExtractMode, root: &Path, f: &ScannedFile) -> (PathB
     }
 }
 
-/// 生成 `name (2).ext` / `name (3).ext`…，保留原扩展名并再次查占用表。
-pub fn unique_name(dir: &Path, name: &str, occupied: &HashSet<String>) -> (String, PathBuf) {
+/// 生成 `name (2).ext` / `name (3).ext`…，保留原扩展名，同时查内存占用表
+/// **与磁盘实际状态**。`start` 是上一次为同名文件用过的序号，用 counter map
+/// 从那里继续，避免 10000 个同名文件时 O(n²) 的字符串构造（约 5000 万次）。
+/// `probe` 由调用方注入（core 层不直接依赖 fs，便于纯内存单测）。
+pub fn unique_name_checked(
+    dir: &Path,
+    name: &str,
+    occupied: &HashSet<String>,
+    start: u64,
+    probe: &dyn Fn(&Path) -> bool,
+) -> ((String, PathBuf), u64) {
     let (stem, ext) = split_name(name);
-    for n in 2..=1_000_000u64 {
+    let mut n = start.max(2);
+    loop {
         let candidate = format!("{stem} ({n}){ext}");
         let path = dir.join(&candidate);
-        if !occupied.contains(&norm(&path)) {
-            return (candidate, path);
+        if !occupied.contains(&norm(&path)) && !probe(&path) {
+            return ((candidate, path), n);
+        }
+        n += 1;
+        if n > 1_000_000 {
+            // 兜底：进程号 + 序号后缀，仍保留扩展名，并继续查占用
+            let fallback = format!("{stem}_fc{}_{}{ext}", std::process::id(), n);
+            let p = dir.join(&fallback);
+            if !occupied.contains(&norm(&p)) && !probe(&p) {
+                return ((fallback, p), n);
+            }
         }
     }
-    // 兜底：时间戳后缀（仍保留扩展名）
-    let fallback = format!("{stem}_fc{}{ext}", std::process::id());
-    (fallback.clone(), dir.join(fallback))
+}
+
+/// 纯内存版本（单元测试 / 不需要磁盘探测的调用方）。
+pub fn unique_name(dir: &Path, name: &str, occupied: &HashSet<String>) -> (String, PathBuf) {
+    unique_name_checked(dir, name, occupied, 2, &|_| false).0
 }
 
 /// 按最后一个点切分；`.gitignore` 这类无扩展名文件整体当 stem。

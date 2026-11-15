@@ -6,7 +6,7 @@ PySide6 桌面界面 + 可脚本化命令行，共用同一套引擎；引擎是
 
 ![工作台](docs/screenshots/app1.png)
 
-`v3.0.0` · Windows 10/11 64 位 · 引擎 Rust（Python 3.15 扩展） · 界面 PySide6 6.10
+`v3.0.1` · Windows 10/11 64 位 · 引擎 Rust（Python 3.15 扩展） · 界面 PySide6 6.10
 
 不想装 Python / Rust？Releases 里有免安装的 `FileCat.exe`，下载双击即用。
 
@@ -259,6 +259,18 @@ py -3 build_exe.py --zip                    :: 额外压成 zip（本版起 Rele
 
 ## 更新记录
 
+### 3.0.1
+
+**文件提取引擎审计后的缺陷修复与性能治理。** 对 3.0.0 新增的 `namecat-extract-core` 与提取页做了逐文件审查、实证复现并修复，新增 8 组回归测试。
+
+- **覆盖策略整条链路可用**：计划生成（只读）不再因「尚未确认覆盖」被拒绝；危险确认只在真实写盘时校验，模拟运行不受限；确认位在配置变动 / 重扫 / 执行收尾一律复位，杜绝残留导致的静默覆盖。
+- **多源同目标覆盖不再丢数据**：同一目标只允许第一个源覆盖，其余自动改名；撤销可完整还原原文件与全部子目录源文件（实测 OLD / ONE / TWO 三方归位）。
+- **撤销可靠性**：真实执行后计划即消费，拒绝用旧计划重跑；0 条目空日志不再生成、不再挡住「撤销上次」；撤销日志改为逐条 append 检查点（崩溃最多丢最后一项），checkpoint 失败立即停止后续搬运；`list_logs` 纯只读，恢复只在撤销时落盘；部分失败跳过的条目保留在日志里供重入；覆盖撤销与 `replace_with_backup` 失败路径都加了回滚，不再出现目标永久空缺。
+- **计划输入校验**：外部 JSON 计划必须满足 root 一致、source/target 在目标文件夹内、冲突策略一致、target≠source，杜绝伪造计划触发任意路径删除。
+- **性能**：3000 文件执行从 8.97s 降到 3.27s（-63.6%）——去掉 `MOVEFILE_WRITE_THROUGH`、日志从 O(n²) 全量重写改为逐条追加且复用文件句柄、CSV 去掉整串双重替换、自动改名加磁盘探测与计数缓存、进度回调节流、日志读取释放 GIL。
+- **GUI / 绑定层**：忙时冻结所有输入、`_busy` 单一防重入、`finished` 兜底防界面卡死、唯一 task_id 与停止按钮按阶段如实启用；`except BaseException` 兜住 PyO3 panic；进度回调异常不再静默吞；非 UTF-8 路径 lossy 序列化，避免「文件已搬完却拿不到日志路径」；撤销后历史页可靠刷新；筛选支持中文状态文案。
+- **验证**：`cargo test --workspace` 145 项全过（含 8 组新增回归）、`run_tests.py` 410 / 0、`test_edges.py` 190 / 0、`rust_check.py` 193 符号、四套离屏 GUI 冒烟全过。
+
 ### 3.0.0
 
 **程序更名 FileCat，新增「文件提取」页与独立 Rust 提取引擎。**
@@ -379,4 +391,4 @@ py -3 build_exe.py --zip                    :: 额外压成 zip（本版起 Rele
 
 ---
 
-FileCat 3.0.0 · 引擎 Rust · 界面基于 PySide6 6.10 · 设计稿见 `docs/design-preview/boards.png`
+FileCat 3.0.1 · 引擎 Rust · 界面基于 PySide6 6.10 · 设计稿见 `docs/design-preview/boards.png`

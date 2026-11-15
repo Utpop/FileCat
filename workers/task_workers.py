@@ -52,7 +52,12 @@ class BaseTask(QRunnable):
         try:
             self._kwargs.setdefault("progress", self._progress)
             out = self._fn(*self._args, **self._kwargs)
-        except Exception as exc:          # 引擎异常要带回界面，而不是静默
+        except (SystemExit, KeyboardInterrupt):
+            # 让解释器退出/中断按原语义传播，别吞掉
+            raise
+        except BaseException as exc:      # noqa: BLE001 - PyO3 PanicException 继承 BaseException
+            # PyO3 的 PanicException 派生自 PyBaseException，普通 `except Exception`
+            # 抓不到；漏掉它的话 failed 不发、界面永远停在 busy。
             self.signals.failed.emit("%s: %s" % (type(exc).__name__, exc))
         else:
             self.signals.done.emit(out)

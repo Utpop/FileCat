@@ -310,6 +310,11 @@ class HistoryPage(QWidget):
         is_extract = row.get("record_type") == "extract"
         pairs = row.get("pairs") or []
         if not pairs:
+            # 静默 return 会让用户以为按钮坏了：0 条目日志（空计划 / 重复
+            # 执行旧计划产生）没有可还原项，明确告知而不是什么都不做。
+            self.notice.set_text(
+                "这份记录没有可还原的文件（0 项），无需撤销。", "info")
+            self.notice.show()
             return
         if is_extract:
             msg = ("类型：文件提取\n目标目录：%s\n日志：%s\n执行时间：%s\n可还原 %d 项。\n\n"
@@ -366,7 +371,11 @@ class HistoryPage(QWidget):
         if ep is not None and hasattr(ep, "bundle"):
             ep.bundle = None
             ep._refresh_ui()
-        self.reload()
+        # done 回调里 runner.busy() 仍可能是 True（线程刚回收、回调未走完），
+        # reload() 开头的守卫会把它静默跳过，撤销后列表还停在旧状态。
+        # 延后一拍等 finished 信号把线程池状态清干净再刷。
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, self.reload)
 
     def open_dir(self):
         path = A.backup_dir()

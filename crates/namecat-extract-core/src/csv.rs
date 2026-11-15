@@ -1,7 +1,6 @@
 //! CSV 导出：UTF-8 BOM + RFC4180 转义，保证 Windows Excel 正确识别中文。
 
 use crate::model::PlanItem;
-use std::fmt::Write as _;
 
 const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
 
@@ -24,10 +23,17 @@ fn cell(value: &str) -> String {
     if !needs {
         return value.to_string();
     }
-    format!("\"{}\"", value.replace('"', "\"\""))
+    // 字段内换行统一成 CRLF（与行分隔符一致，Excel 里能正确显示为单元格内换行）。
+    let flat = value
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\n', "\r\n");
+    format!("\"{}\"", flat.replace('"', "\"\""))
 }
 
 /// 导出计划清单或执行结果为 CSV 文本（不含 BOM，BOM 由 `to_bytes` 加）。
+/// 直接以 CRLF 写行：旧实现先 `writeln!` 出 \n 再对整串做两次全量 replace，
+/// 上万行时会额外产生两份完整字符串拷贝（内存峰值约 3 倍）。
 pub fn export(items: &[PlanItem]) -> String {
     let mut out = String::with_capacity(256 + items.len() * 200);
     out.push_str(&HEADERS.iter().map(|h| cell(h)).collect::<Vec<_>>().join(","));
@@ -48,10 +54,10 @@ pub fn export(items: &[PlanItem]) -> String {
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default(),
         ];
-        let _ = writeln!(out, "{}", row.iter().map(|v| cell(v)).collect::<Vec<_>>().join(","));
+        out.push_str(&row.iter().map(|v| cell(v)).collect::<Vec<_>>().join(","));
+        out.push_str("\r\n");
     }
-    // writeln! 用 \n，Excel 也认，统一成 CRLF 更稳
-    out.replace("\r\n", "\n").replace('\n', "\r\n")
+    out
 }
 
 /// 带 UTF-8 BOM 的字节（写文件用）。
