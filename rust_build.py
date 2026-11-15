@@ -142,12 +142,14 @@ def smoke() -> None:
     env = dict(os.environ)
     env["PYTHONPATH"] = VENDOR + os.pathsep + ROOT
     code = (
-        "import namecat_py, namecat_py.rules, engine\n"
+        "import namecat_py, namecat_py.rules, namecat_py.extract, engine\n"
         "assert namecat_py.APP_VER == engine.APP_VER, (namecat_py.APP_VER, engine.APP_VER)\n"
         "assert namecat_py.STATUS_TEXT == engine.STATUS_TEXT\n"
         "assert namecat_py.LOG_SCHEMA == engine.LOG_SCHEMA\n"
-        "print('✓ import 冒烟通过：%s，子模块 %d 个' % (namecat_py._hello()['version'],\n"
-        "      len([n for n in dir(namecat_py) if not n.startswith('_')])))\n"
+        "assert 'extract' in dir(namecat_py), 'extract 子模块没挂上'\n"
+        "assert callable(namecat_py.extract.build_plan), 'extract.build_plan 不可用'\n"
+        "assert callable(namecat_py.extract.undo_latest), 'extract.undo_latest 不可用'\n"
+        "print('✓ import 冒烟通过：%s，重命名子模块 12 个 + extract 独立引擎' % namecat_py._hello()['version'])\n"
     )
     proc = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env)
     if proc.returncode != 0:
@@ -155,7 +157,7 @@ def smoke() -> None:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="构建 NameCat 的 Rust 引擎扩展")
+    parser = argparse.ArgumentParser(description="构建 FileCat 的 Rust 引擎扩展")
     parser.add_argument("--debug", action="store_true", help="debug 构建（编译更快）")
     parser.add_argument("--check", action="store_true", help="只校验，不编译")
     args = parser.parse_args(argv)

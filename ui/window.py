@@ -21,14 +21,15 @@ from ui import prefs as P
 from ui.base import (C, F, HEADER_H, STATUS_H, SIDEBAR_W, WIN_H, WIN_W, Button,
                      Elided, Label, LlmBubble, NavButton, hbox, icon, svg_pixmap,
                      vbox)
+from ui.pages.extract import ExtractPage
 from ui.pages.history import HistoryPage
 from ui.pages.llm_settings import LlmPage
-from ui.pages.presets import PresetsPage
+from ui.pages.presets import PresetDialog
 
 PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 from ui.pages.workspace import WorkspacePage
 
-NAV = [("workspace", "重命名工作台"), ("preset", "预设"),
+NAV = [("workspace", "文件重命名"), ("inbox", "文件提取"),
        ("history", "执行记录"), ("spark", "供应商配置")]
 
 QSS = """
@@ -111,10 +112,11 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.stack.setObjectName("Root")
         self.page_ws = WorkspacePage()
-        self.page_presets = PresetsPage()
+        self.page_extract = ExtractPage()
         self.page_history = HistoryPage()
         self.page_llm = LlmPage()
-        for page in (self.page_ws, self.page_presets, self.page_history, self.page_llm):
+        for page in (self.page_ws, self.page_extract,
+                     self.page_history, self.page_llm):
             self.stack.addWidget(page)
 
         # 页面本身不滚动：列表都在各自卡片内滚动（见 ui/pages/*）
@@ -143,7 +145,7 @@ class MainWindow(QMainWindow):
             logo.setPixmap(QPixmap(_app_icon).scaled(
                 26, 26, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         lay.addWidget(logo, 0, Qt.AlignVCenter)
-        lay.addWidget(Label("NameCat", 15, 600, C["t1"], -0.1), 0, Qt.AlignVCenter)
+        lay.addWidget(Label(A.APP_NAME, 15, 600, C["t1"], -0.1), 0, Qt.AlignVCenter)
         ver = QLabel("v%s" % A.APP_VER)
         ver.setFont(F(11, 500))
         ver.setFixedHeight(20)
@@ -197,17 +199,17 @@ class MainWindow(QMainWindow):
 
     # ---------------- 连线 ----------------
     def _wire(self):
-        for page in (self.page_ws, self.page_presets, self.page_history, self.page_llm):
+        for page in (self.page_ws, self.page_extract,
+                     self.page_history, self.page_llm):
             page.status_message.connect(self.show_status)
-        self.page_presets.apply_requested.connect(self.apply_preset)
-        self.page_ws.load_preset_requested.connect(lambda: self._goto(1))
+        self.page_ws.load_preset_requested.connect(self.open_preset_dialog)
         self.page_ws.save_preset_requested.connect(self.save_preset)
         self.page_llm.saved.connect(self._remember)
         self.page_llm.status_changed.connect(self.refresh_llm_bubble)
 
     # ---------------- LLM 状态气泡 ----------------
     def goto_llm_page(self):
-        """气泡被点开：跳到「供应商配置」页。"""
+        """气泡被点开：跳到「供应商配置」页（现在第 4 页）。"""
         self._goto(3)
 
     def refresh_llm_bubble(self):
@@ -233,9 +235,8 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(index)
         for i, b in enumerate(self.nav):
             b.setChecked(i == index)
-        if index == 1:
-            self.page_presets.reload()
-        elif index == 2:
+        # index: 0 文件重命名 / 1 文件提取 / 2 执行记录 / 3 供应商配置
+        if index == 2:
             self.page_history.reload()
         elif index == 3:
             self.page_llm.reload(False)
@@ -259,8 +260,13 @@ class MainWindow(QMainWindow):
 
     def apply_preset(self, preset):
         self.page_ws.apply_preset(preset)
-        self._goto(0)
         self.show_status("已应用预设：%s" % getattr(preset, "name", ""))
+
+    def open_preset_dialog(self):
+        """「加载预设」按钮：弹出选择 / 编辑预设的额外窗口。"""
+        dlg = PresetDialog(self)
+        dlg.applied.connect(self.apply_preset)
+        dlg.exec()
 
     def save_preset(self):
         name, ok = QInputDialog.getText(self, "保存为预设", "预设名称：", text="我的预设")
@@ -272,18 +278,19 @@ class MainWindow(QMainWindow):
             self.show_status("保存预设失败：%s" % exc)
             return
         self.show_status("已保存预设：%s" % path)
-        self.page_presets.reload()
 
     def show_help(self):
         from PySide6.QtWidgets import QMessageBox
         QMessageBox.information(
             self, "帮助",
-            "NameCat %s —— 批量重命名\n\n"
-            "工作流：选择目录或文件 → 扫描 → 加规则 → 生成预览 → 执行。\n"
-            "预览只算新名字，不落盘；执行会写撤销日志，可在「执行记录」撤回。\n\n"
+            "%s %s —— 批量重命名与文件提取\n\n"
+            "重命名工作台：选择目录 → 扫描 → 加规则 → 预览 → 执行，可在「执行记录」撤回。\n"
+            "文件提取：选择目标文件夹 → 扫描预览 → 模拟或开始提取 → 撤销上次；"
+            "撤销日志固定在程序目录\\Extract\\Rollback_Log。\n\n"
             "快捷键：F5 重新扫描 · Ctrl+Enter 生成预览 · Ctrl+1…4 切页\n\n"
-            "预设目录：%s\n撤销日志：%s\n要求文件：%s"
-            % (A.APP_VER, A.preset_dir(), A.backup_dir(), A.llm_instruction_path()))
+            "预设目录：%s\n重命名撤销日志：%s\n要求文件：%s"
+            % (A.APP_NAME, A.APP_VER, A.preset_dir(), A.backup_dir(),
+               A.llm_instruction_path()))
 
     # ---------------- 偏好 ----------------
     def _restore(self):
@@ -302,7 +309,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):  # noqa: N802
         self._remember()
-        for page in (self.page_ws, self.page_history):
+        for page in (self.page_ws, self.page_extract, self.page_history):
             shutdown = getattr(page, "shutdown", None)
             if callable(shutdown):
                 shutdown()

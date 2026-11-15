@@ -47,6 +47,8 @@ ST_SKIP = "skip"
 # --------------------------------------------------------------------------- #
 
 ONLY_LABELS = {
+    # "all" 仍留在字典里：命令行 --only all 与旧预设的 kinds 反推都要认，
+    # 但界面下拉（ONLY_ORDER）不再列出「文件 + 文件夹」这一档。
     "all": "文件 + 文件夹",
     "file": "仅文件",
     "dir": "仅文件夹",
@@ -54,7 +56,7 @@ ONLY_LABELS = {
     "video": "仅视频",
     "media": "图片 + 视频",
 }
-ONLY_ORDER = ["all", "file", "dir", "image", "video", "media"]
+ONLY_ORDER = ["file", "dir", "image", "video", "media"]
 
 
 def kinds_for(only: str) -> Tuple[str, ...]:
@@ -88,8 +90,8 @@ class FormState:
     """界面上的全部可调参数。纯数据，不含 Qt，方便测试与预设序列化。"""
 
     root: str = ""
-    only: str = "file"
-    recursive: bool = False
+    only: str = "media"
+    recursive: bool = True
     include_hidden: bool = False
     only_match: str = ""
     exclude_match: str = ""
@@ -171,7 +173,9 @@ class FormState:
         kinds = tuple(data.get("kinds") or ())
         for only, ks in ONLY_CHOICES.items():
             if tuple(ks) == kinds:
-                self.only = only
+                # 界面下拉已去掉「文件 + 文件夹」；旧预设命中 all 时回落到
+                # 默认档「图片 + 视频」，避免显示一个下拉里不存在的原始代号。
+                self.only = only if only in ONLY_ORDER else "media"
                 break
         for key in ("recursive", "include_hidden", "verify_content"):
             if key in data:

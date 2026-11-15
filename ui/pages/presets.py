@@ -1,28 +1,34 @@
 # -*- coding: utf-8 -*-
-"""ui.pages.presets —— 预设页（真实读写 %APPDATA%\\NameCat\\presets）。"""
+"""ui.pages.presets —— 「加载预设」弹出的独立窗口（选择 / 编辑 / 删除预设）。
+
+原先是主窗口的第 3 页；3.0.0 起改为由「文件重命名」页的「加载预设」按钮
+弹出 QDialog，主窗口不再保留预设页。数据读写仍全走 engine_adapter（A），
+不碰引擎内部结构。
+"""
 
 from __future__ import annotations
 
 import os
-from typing import List
+from typing import List, Optional
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QMessageBox, QPushButton, QWidget
+from PySide6.QtWidgets import (QDialog, QInputDialog, QMessageBox, QPushButton,
+                                QWidget)
 
 from adapters import engine_adapter as A
 from ui import prefs
-from ui.base import (C, F, Button, Card, Elided, Label, NoticeBar, PageHead, Strip,
-                     fit_scroll_content, grid_row, hbox, hline, scroll_area, vbox)
+from ui.base import (C, F, Button, Card, Elided, Label, NoticeBar, Strip,
+                      fit_scroll_content, grid_row, hbox, hline, scroll_area, vbox)
 from ui.pages.workspace import Item
 
 
 class PresetOps(QWidget):
-    """操作列：应用右边缘共线，删除/打开目录右对齐。"""
+    """操作列：应用 / 编辑 / 删除（或打开目录）右对齐。"""
 
     def __init__(self, row, parent=None):
         super().__init__(parent)
-        self.setFixedWidth(150)
-        lay = hbox(self, 0, 18)
+        self.setFixedWidth(190)
+        lay = hbox(self, 0, 14)
         lay.addStretch(1)
         if row["kind"] == "bad":
             b = QPushButton("打开目录")
@@ -34,60 +40,75 @@ class PresetOps(QWidget):
             lay.addWidget(b, 0, Qt.AlignRight | Qt.AlignVCenter)
             return
 
-        apply_btn = QPushButton("应用")
-        apply_btn.setFont(F(12, 500))
-        apply_btn.setFixedWidth(24)
-        apply_btn.setCursor(Qt.PointingHandCursor)
-        apply_btn.setStyleSheet("QPushButton{border:0;background:transparent;color:%s;padding:0;}"
-                                "QPushButton:hover{text-decoration:underline;}" % C["t1"])
-        apply_btn.clicked.connect(row["apply"])
-        lay.addWidget(apply_btn, 0, Qt.AlignRight | Qt.AlignVCenter)
+        def link(text, slot, color=None, enabled=True):
+            b = QPushButton(text)
+            b.setFont(F(12, 500 if text == "应用" else 400))
+            b.setCursor(Qt.PointingHandCursor if enabled else Qt.ArrowCursor)
+            b.setEnabled(enabled)
+            b.setStyleSheet("QPushButton{border:0;background:transparent;color:%s;padding:0;}"
+                            "QPushButton:hover{text-decoration:%s;}"
+                            % (color or C["t1"], "underline" if enabled else "none"))
+            b.clicked.connect(slot)
+            return b
 
+        lay.addWidget(link("应用", row["apply"]), 0, Qt.AlignRight | Qt.AlignVCenter)
+        # 内置预设也能「编辑」：改名 + 说明后另存为自定义，不改内置数据
+        lay.addWidget(link("编辑", row["edit"]), 0, Qt.AlignRight | Qt.AlignVCenter)
         can_del = row["kind"] in ("custom", "builtin")
-        del_btn = QPushButton("删除")
-        del_btn.setFont(F(12))
-        del_btn.setFixedWidth(24)
-        del_btn.setStyleSheet("QPushButton{border:0;background:transparent;color:%s;padding:0;}"
-                              "QPushButton:hover{text-decoration:%s;}"
-                              % (C["err"] if can_del else C["t4"],
-                                 "underline" if can_del else "none"))
-        del_btn.setEnabled(can_del)
-        del_btn.setCursor(Qt.PointingHandCursor if can_del else Qt.ArrowCursor)
-        del_btn.clicked.connect(row["delete"])
-        lay.addWidget(del_btn, 0, Qt.AlignRight | Qt.AlignVCenter)
+        lay.addWidget(link("删除", row["delete"],
+                           C["err"] if can_del else C["t4"], can_del),
+                      0, Qt.AlignRight | Qt.AlignVCenter)
 
 
-class PresetsPage(QWidget):
+class PresetDialog(QDialog):
+    """选择 / 编辑预设的额外窗口。
 
-    status_message = Signal(str)
-    apply_requested = Signal(object)
+    applied(preset) 信号：选中「应用」时把 Preset 交给调用方（主窗口），
+    由它调用 WorkspacePage.apply_preset()，对话框随后关闭。
+    """
+
+    applied = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setWindowTitle("加载预设")
+        self.setMinimumSize(760, 520)
         self.setObjectName("Root")
+        self.setStyleSheet("#Root{background:%s;}" % C["white"])
         self._rows: List[dict] = []
 
-        outer = vbox(self, (20, 18, 20, 12), 12)
-        restore_btn = Button("恢复内置预设", "refresh")
+        outer = vbox(self, (18, 16, 18, 12), 12)
+        title = Label("加载预设", 20, 600, C["t1"])
+        outer.addWidget(title)
+        outer.addWidget(Label("规则链 + 扫描 / 编号选项的命名组合；应用只替换配置，不改动任何文件",
+                              12, 400, C["t2"]))
+
+        bar = hbox(None, 0, 8)
+        restore_btn = Button("恢复内置预设", "refresh", "mid")
         restore_btn.clicked.connect(self._restore_builtin)
         self.restore_btn = restore_btn
-        reload_btn = Button("刷新", "refresh")
+        bar.addWidget(restore_btn)
+        reload_btn = Button("刷新", "refresh", "mid")
         reload_btn.clicked.connect(self.reload)
-        open_btn = Button("打开预设目录", "open")
+        bar.addWidget(reload_btn)
+        open_btn = Button("打开预设目录", "open", "mid")
         open_btn.clicked.connect(self.open_dir)
-        outer.addWidget(PageHead(
-            "预设", "规则链 + 扫描 / 编号选项的命名组合，不含根目录与任何密钥",
-            [restore_btn, reload_btn, open_btn]))
+        bar.addWidget(open_btn)
+        bar.addWidget(QWidget(), 1)
+        close_btn = Button("关闭", "x", "mid")
+        close_btn.clicked.connect(self.reject)
+        bar.addWidget(close_btn)
+        outer.addLayout(bar)
 
-        self.notice = NoticeBar("内置预设可以删除（只是从列表隐藏，随时可恢复）；"
-                                "自定义预设保存为 .json，文件损坏时该行标记「读取失败」")
+        self.notice = NoticeBar("内置预设可删除（只是隐藏，可恢复）；自定义预设为 .json，"
+                                "「编辑」可改名与说明")
         outer.addWidget(self.notice)
 
         card = Card()
         lay = vbox(card, 0, 0)
-        lay.addWidget(grid_row([Item(("预设名称", 280)), Item(("来源", 110)),
-                                Item(("规则数", 76), align_right=True), Item("说明"),
-                                Item(("操作", 150), align_right=True)],
+        lay.addWidget(grid_row([Item(("预设名称", 240)), Item(("来源", 90)),
+                                Item(("规则数", 70), align_right=True), Item("说明"),
+                                Item(("操作", 190), align_right=True)],
                                36, pad=(0, 14), holder=Strip(C["s1"])))
         lay.addWidget(hline())
 
@@ -98,11 +119,11 @@ class PresetsPage(QWidget):
         lay.addWidget(hline())
 
         foot = Strip(C["s1"])
-        foot.setFixedHeight(44)
+        foot.setFixedHeight(40)
         fl = hbox(foot, (14, 0, 14, 0), 8)
         self.foot_left = Label("", 12, 400, C["t2"])
         fl.addWidget(self.foot_left, 1)
-        fl.addWidget(Label("应用预设只替换规则链与扫描选项，不改动任何文件", 11, 400, C["t3"]))
+        fl.addWidget(Label("双击一行也可直接应用", 11, 400, C["t3"]))
         lay.addWidget(foot)
         outer.addWidget(card, 1)
         self.reload()
@@ -121,7 +142,7 @@ class PresetsPage(QWidget):
         hidden = set(self._hidden_builtins())
         for name, preset in A.builtin_presets():
             if name in hidden:
-                continue                       # 被用户删掉的内置预设不再列出
+                continue
             rows.append({"name": name, "source": "内置", "kind": "builtin",
                          "count": len(preset.rules or []),
                          "note": preset.note or "内置预设", "preset": preset, "path": ""})
@@ -146,7 +167,6 @@ class PresetsPage(QWidget):
         builtin = sum(1 for r in rows if r["kind"] == "builtin")
         self.foot_left.setText("共 %d 个预设 · 内置 %d / 自定义 %d / 读取失败 %d"
                                % (len(rows), builtin, custom, broken))
-        # 有被隐藏的内置预设时才出现「恢复」入口
         self.restore_btn.setVisible(bool(hidden))
 
     def _fill(self):
@@ -165,22 +185,24 @@ class PresetsPage(QWidget):
         w.setObjectName("LRow")
         w.setAttribute(Qt.WA_StyledBackground, True)
         w.setFixedHeight(56)
+        w.setCursor(Qt.PointingHandCursor)
         lay = hbox(w, (14, 0, 14, 0), 0)
 
         name = Elided(row["name"], 13, 500, C["t1"])
-        name.setFixedWidth(280)
+        name.setFixedWidth(240)
         color = {"custom": C["info"], "bad": C["err"]}.get(row["kind"], C["t2"])
         src = Elided(row["source"], 12, 500 if row["kind"] != "builtin" else 400, color)
-        src.setFixedWidth(110)
+        src.setFixedWidth(90)
         num = Label(str(row["count"]) if row["count"] else "—", 12, 400, C["t2"])
-        num.setFixedWidth(76)
+        num.setFixedWidth(70)
         num.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        num.setContentsMargins(0, 0, 16, 0)
+        num.setContentsMargins(0, 0, 12, 0)
         note = Elided(row["note"], 12, 400, C["err"] if row["kind"] == "bad" else C["t2"])
         note.setContentsMargins(8, 0, 0, 0)
 
         bind = dict(row)
         bind.update({"apply": lambda: self._apply(row),
+                     "edit": lambda: self._edit(row),
                      "delete": lambda: self._delete(row),
                      "open_dir": self.open_dir})
         lay.addWidget(name, 0)
@@ -188,14 +210,48 @@ class PresetsPage(QWidget):
         lay.addWidget(num, 0)
         lay.addWidget(note, 1)
         lay.addWidget(PresetOps(bind), 0)
+        # 双击整行 = 应用
+        w.mouseDoubleClickEvent = lambda _e, r=row: self._apply(r)
         return w
 
     # ---------------- 动作 ----------------
     def _apply(self, row):
         if row["preset"] is None:
             return
-        self.apply_requested.emit(row["preset"])
-        self.status_message.emit("已应用预设：%s" % row["name"])
+        self.applied.emit(row["preset"])
+        self.accept()
+
+    def _edit(self, row):
+        """编辑预设：改名 + 说明。
+
+        自定义预设覆盖原文件；内置预设另存为一份新的自定义预设（内置数据不动）。
+        规则链本身仍在工作台里编辑，这里只管元数据。
+        """
+        if row["preset"] is None:
+            return
+        name, ok = QInputDialog.getText(self, "编辑预设名称", "预设名称：",
+                                        text=row["name"])
+        if not ok or not name.strip():
+            return
+        note, ok2 = QInputDialog.getText(self, "编辑预设说明", "说明：",
+                                         text=row["note"] or "")
+        if not ok2:
+            return
+        preset = row["preset"]
+        preset.name = name.strip()
+        preset.note = note.strip()
+        try:
+            if row["kind"] == "custom" and row["path"]:
+                path = A.save_preset(preset, row["path"])
+            else:
+                path = A.save_preset(preset)   # 内置 → 另存为自定义
+        except Exception as exc:
+            self.notice.set_text("保存失败：%s" % exc, "error")
+            self.notice.show()
+            return
+        self.notice.set_text("已保存预设：%s" % os.path.basename(path), "success")
+        self.notice.show()
+        self.reload()
 
     def _delete(self, row):
         if row["kind"] not in ("custom", "builtin"):
@@ -203,14 +259,13 @@ class PresetsPage(QWidget):
         if row["kind"] == "builtin":
             if QMessageBox.question(
                     self, "删除内置预设",
-                    "确认删除内置预设「%s」？\n\n它不会被真正删除，随时可用页面上方的"
+                    "确认删除内置预设「%s」？\n\n它不会被真正删除，随时可用"
                     "「恢复内置预设」找回。" % row["name"],
                     QMessageBox.Yes | QMessageBox.No,
                     QMessageBox.No) != QMessageBox.Yes:
                 return
             self._set_hidden_builtins(self._hidden_builtins() + [row["name"]])
-            self.notice.set_text("已删除内置预设「%s」，需要时点「恢复内置预设」找回"
-                                 % row["name"], "success")
+            self.notice.set_text("已隐藏内置预设「%s」" % row["name"], "success")
             self.notice.show()
             self.reload()
             return
@@ -235,7 +290,7 @@ class PresetsPage(QWidget):
         path = A.preset_dir()
         try:
             os.makedirs(path, exist_ok=True)
-            os.startfile(path)  # noqa: S606 - Windows 资源管理器
+            os.startfile(path)  # noqa: S606
         except Exception as exc:
             self.notice.set_text("打不开预设目录：%s" % exc, "warn")
             self.notice.show()

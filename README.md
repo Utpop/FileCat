@@ -1,4 +1,4 @@
-# NameCat
+# FileCat
 
 Windows 批量重命名工具。扫描文件 / 文件夹 / 图片 / 视频，用一条可排序的规则链算出新名字，**先预览、再落盘、全程可撤销**。
 
@@ -6,9 +6,9 @@ PySide6 桌面界面 + 可脚本化命令行，共用同一套引擎；引擎是
 
 ![工作台](docs/screenshots/app1.png)
 
-`v2.1.1` · Windows 10/11 64 位 · 引擎 Rust（Python 3.15 扩展） · 界面 PySide6 6.10
+`v3.0.0` · Windows 10/11 64 位 · 引擎 Rust（Python 3.15 扩展） · 界面 PySide6 6.10
 
-不想装 Python / Rust？Releases 里有免安装的 `NameCat.exe`，下载双击即用。
+不想装 Python / Rust？Releases 里有免安装的 `FileCat.exe`，下载双击即用。
 
 ---
 
@@ -63,7 +63,9 @@ PySide6 桌面界面 + 可脚本化命令行，共用同一套引擎；引擎是
 | **执行记录** | **供应商配置** |
 | ![执行记录](docs/screenshots/app3.png) | ![供应商配置](docs/screenshots/app4.png) |
 
-四个页面：**工作台**（扫描 → 规则链 → 预览 → 执行）、**预设**、**执行记录**（查看与撤销）、**供应商配置**（LLM 接入）。
+四个页面：**文件重命名**（扫描 → 规则链 → 预览 → 执行）、**文件提取**（递归扫描 → 预览 → 模拟/执行 → 撤销，独立 Rust 引擎）、**执行记录**（同时列出重命名与文件提取两类记录，各自撤销）、**供应商配置**（LLM 接入）。预设不再是独立页面，点文件重命名页的「加载预设」弹出选择/编辑窗口。
+
+文件提取页的撤销日志固定在 **`<程序目录>\Extract\Rollback_Log\`**，含 `rollback_*.json` 与 `backups\`；与重命名的 `Name_backup` 完全隔离。
 
 工作台右上角的 ⤢ 把预览表放大到整页（`Esc` 还原）；规则多时列表在卡内滚动。
 
@@ -80,7 +82,7 @@ PySide6 桌面界面 + 可脚本化命令行，共用同一套引擎；引擎是
 
 ### 方式一：绿色版（推荐，不需要 Python）
 
-1. 从 Releases 下载 `NameCat.exe`，保存到任意目录；
+1. 从 Releases 下载 `FileCat.exe`，保存到任意目录；
 2. 双击运行（无需解压、无需安装 Python）。
 
 单文件 exe 首次启动要解包约 30 MB 到 `%TEMP%`，比后续启动慢一两秒；被 SmartScreen 拦截时选「更多信息」→「仍要运行」。
@@ -93,8 +95,8 @@ PySide6 桌面界面 + 可脚本化命令行，共用同一套引擎；引擎是
 py -3 -m pip install -r requirements.txt
 py -3 -m pip install maturin
 py -3 rust_build.py          :: 构建引擎扩展，装进 _vendor\
-NameCat.vbs                 :: 双击启动（无控制台）
-namecat.bat                 :: 带控制台启动，报错直接可见
+FileCat.vbs                 :: 双击启动（无控制台）
+FileCat.bat                 :: 带控制台启动，报错直接可见
 python main.py              :: 等价写法
 ```
 
@@ -107,7 +109,7 @@ python main.py              :: 等价写法
 | 现象 | 原因与处理 |
 |---|---|
 | 双击 exe 弹出 **`Could not create temporary directory!`** | 当前账号的 `%TEMP%` 不可写（企业策略 / 安全软件锁住 / 用别的账号运行）。`set TEMP=%LOCALAPPDATA%\Temp` 后重新启动 |
-| 双击没反应 | 看 `%TEMP%\NameCat_startup_error.log`；或改用 `namecat.bat` 启动，能直接看到 traceback |
+| 双击没反应 | 看 `%TEMP%\FileCat_startup_error.log`；或改用 `FileCat.bat` 启动，能直接看到 traceback |
 | 提示「引擎扩展没加载」 | 源码运行前忘了 `py -3 rust_build.py`；或 Python 版本与 `.pyd` 的 `cp315` 不一致 |
 | LLM 规则没生效 | 左下角气泡看状态；没有可用客户端时规则会原样放行并在提示里说明原因 |
 
@@ -154,7 +156,7 @@ python main.py leftovers D:\照片
 扫描 ──► 排序编号 ──► 规则链算名 ──► 两遍校验 ──► 预览 ──► 执行 ──► 撤销日志
 ```
 
-- 日志统一放 **`<程序目录>\Name_backup\`**，不写进被改名的目录（不会污染你的数据）；程序目录不可写时退回 `%APPDATA%\NameCat\Name_backup`，`NAMECAT_LOG_DIR` 可强制指定。
+- 日志统一放 **`<程序目录>\Name_backup\`**，不写进被改名的目录（不会污染你的数据）；程序目录不可写时退回 `%APPDATA%\FileCat\Name_backup`，`NAMECAT_LOG_DIR` 可强制指定。
 - 文件名带 8 位目录指纹（`rename_<指纹>_<日期>_<时分秒>_<随机>.json`），各目录的日志混放也能分开查、分开清。
 - 保留策略：每个目录最近 20 份，总量上限 200。
 - 旧版本留在目标目录 `_rename_logs\` 的日志仍可读（只读兼容）。
@@ -169,9 +171,9 @@ python main.py leftovers D:\照片
 - **高级**：模型列表 URL、自定义请求头（随每次请求发出）
 - **测试连接**：真发一个请求验证地址 / 密钥 / 模型，报耗时与失败原因（401 / 404 / 连不上都说人话）
 
-密钥**不回显**，单独存 `%APPDATA%\NameCat\llm_credential.dat`（Windows DPAPI 加密，只有当前账号解得开）；地址、模型等非敏感项存 `llm_provider.json`。输入框留空表示沿用已保存的密钥。
+密钥**不回显**，单独存 `%APPDATA%\FileCat\llm_credential.dat`（Windows DPAPI 加密，只有当前账号解得开）；地址、模型等非敏感项存 `llm_provider.json`。输入框留空表示沿用已保存的密钥。
 
-整理要求在 `%APPDATA%\NameCat\llm_instruction.txt` 里自由编辑（同页右侧），`#` 开头是注释、不会发给模型。左下角气泡显示真实连接状态与平均耗时；测试连接与拉模型列表都在后台线程跑，不卡界面。
+整理要求在 `%APPDATA%\FileCat\llm_instruction.txt` 里自由编辑（同页右侧），`#` 开头是注释、不会发给模型。左下角气泡显示真实连接状态与平均耗时；测试连接与拉模型列表都在后台线程跑，不卡界面。
 
 命令行也认环境变量（界面保存过配置时以界面为准，命令行参数优先级最高）：
 
@@ -187,12 +189,13 @@ set NAMECAT_LLM_MODEL=deepseek-chat
 
 | 位置 | 内容 |
 |---|---|
-| `%APPDATA%\NameCat\` | 界面偏好、自定义预设（**不含任何密钥**） |
-| `%APPDATA%\NameCat\llm_provider.json` | LLM 地址 / 模型 / 请求头 |
-| `%APPDATA%\NameCat\llm_credential.dat` | LLM 密钥（DPAPI 加密） |
-| `<程序目录>\Name_backup\` | 撤销日志（含本机真实路径） |
+| `%APPDATA%\FileCat\` | 界面偏好、自定义预设（**不含任何密钥**） |
+| `%APPDATA%\FileCat\llm_provider.json` | LLM 地址 / 模型 / 请求头 |
+| `%APPDATA%\FileCat\llm_credential.dat` | LLM 密钥（DPAPI 加密） |
+| `<程序目录>\Name_backup\` | 重命名撤销日志（含本机真实路径） |
+| `<程序目录>\Extract\Rollback_Log\` | 文件提取撤销日志与覆盖备份（含本机真实路径） |
 
-预设与撤销日志都不含密钥；`Name_backup/`、`gui_state.json` 已列入 `.gitignore`，不会进仓库。
+预设与撤销日志都不含密钥；`Name_backup/`、`Extract/`、`gui_state.json` 已列入 `.gitignore`，不会进仓库。
 
 ## 工程结构
 
@@ -206,8 +209,10 @@ engine/                    应用层（Python）
   __init__.py                应用名 / 版本 / 状态文案 / appdata 与旧目录迁移
   cli.py                     命令行全部逻辑（含 GBK 符号降级）
   llm_resolve.py             LLM 规则的"批量问一次模型"桥（由 Rust 侧的 plan 回调）
-ui/                        PySide6 界面：base.py 设计令牌与控件，pages/ 四个页面
-adapters/engine_adapter.py 界面 ⇄ 引擎的唯一通道（FormState ⇄ 引擎参数）
+ui/                        PySide6 界面：base.py 设计令牌与公共 StatusSlot，pages/ 四个页面 + 预设对话框
+adapters/engine_adapter.py 界面 ⇄ 重命名引擎的唯一通道（FormState ⇄ 引擎参数）
+adapters/extract_adapter.py 界面 ⇄ 文件提取引擎的唯一通道（独立 FormState/Bundle）
+crates/namecat-extract-core/ 文件提取引擎（纯 Rust，独立，可单独 cargo test）
 workers/                   后台任务（QRunnable + 线程池，信号回主线程）
 rust_build.py              构建引擎：校验版本一致 → maturin → 装 .pyd 进 _vendor
 build_exe.py               打包：三道闸 + 生成 spec 瘦身 + 打包后自检
@@ -227,13 +232,13 @@ py -3 verify\run_tests.py                  :: 引擎 + 端到端 + 回归（410 
 py -3 verify\test_edges.py                 :: 边界与异常路径（190 断言 + 16 个缺陷探针）
 py -3 verify\ui_smoke.py                   :: 界面全流程冒烟（离屏，无需显示器）
 py -3 verify\bench.py                       :: 性能基准（2000 文件，7 轮中位数）
-py -3 build_exe.py                          :: 打包 + 自检（产出 dist/NameCat.exe）
+py -3 build_exe.py                          :: 打包 + 自检（产出 dist/FileCat.exe）
 py -3 build_exe.py --zip                    :: 额外压成 zip（本版起 Release 默认直发 EXE）
 ```
 
 - `rust_check.py` 拿 `verify/engine_symbols.json`（Rust 化之前固化的期望集）比对扩展导出，少一个符号就红。
 - `bench.py` 里带 1.6.3 的参考值，只能看量级 —— 严谨对比要在同一时段背靠背跑两版。
-- 发版流程：改 `engine/__init__.py` 的 `APP_VER` 与 `Cargo.toml` 版本（必须一致，`rust_build.py` 会校验）→ 重建 → 跑上面几条 → `build_exe.py`（不加 `--zip`，直接拿 `dist/NameCat.exe`）→ commit + `git tag -a vX.Y.Z` → push → `gh release create … dist/NameCat.exe`。
+- 发版流程：改 `engine/__init__.py` 的 `APP_VER` 与 `Cargo.toml` 版本（必须一致，`rust_build.py` 会校验）→ 重建 → 跑上面几条 → `build_exe.py`（不加 `--zip`，直接拿 `dist/FileCat.exe`）→ commit + `git tag -a vX.Y.Z` → push → `gh release create … dist/FileCat.exe`。
 
 ### 性能（2000 个文件，迁移时背靠背 A/B）
 
@@ -254,6 +259,20 @@ py -3 build_exe.py --zip                    :: 额外压成 zip（本版起 Rele
 
 ## 更新记录
 
+### 3.0.0
+
+**程序更名 FileCat，新增「文件提取」页与独立 Rust 提取引擎。**
+
+- 程序名由 NameCat 改为 **FileCat**；数据目录 `%APPDATA%\FileCat`（旧 `NameCat` / `NameKit` 配置自动迁移）。
+- 新增 `crates/namecat-extract-core`：纯 Rust、零 PyO3/Qt 依赖，与原重命名 `namecat-core` 完全隔离；通过现有扩展挂成 `namecat_py.extract` 子模块，仍共用一份 `.pyd` 与同一套 EXE 打包链路。
+- 新增第五个页面「文件提取」：一次到底 / 逐级上移、扫描深度、三种同名策略、排除规则、模拟运行、停止、空目录清理、撤销、CSV（UTF-8 BOM）。撤销日志固定在 `<程序目录>\Extract\Rollback_Log\`，与 `Name_backup` 隔离。
+- 原「重命名工作台」更名为「文件重命名」；「包含子文件夹」默认打开、「清理空文件夹」默认打开。
+- 文件提取清单改为原生 `QHeaderView`，表头与内容列同源对齐（修复初版手绘表头错位）。
+- 文件重命名页工具栏加进度条；状态反馈抽成公共 `StatusSlot`，两页同款胶囊、不再有独立横幅。
+- 「执行记录」同时列出重命名与文件提取两类日志，按类型徽章区分、各自独立撤销。
+- 预设改为文件重命名页「加载预设」弹出的选择/编辑对话框；主窗口精简为四页。
+- 扫描对象下拉恢复原样式，默认「图片 + 视频」，移除「文件 + 文件夹」同时扫描档（命令行 `--only all` 仍可用）。
+
 ### 2.1.1
 
 **修复：执行重命名 / 撤销后预览没有及时更新**。落盘会改变磁盘上的名字，但工作台仍持有执行前的 `PlanBundle`，旧实现只把预览标成「配置已改动」，表格还显示改名前的清单；点「重新生成预览」又会拿旧 `Item` 重算，预览与磁盘脱节。现在执行 / 撤销完成后自动按磁盘现状重扫，重扫结束把执行结果贴回状态槽；清单失效期间禁止再次执行、导出和按旧清单算名。执行记录页的撤销走同一套刷新流程，`verify/ui_smoke.py` 补了「表格名字与磁盘一致」的执行 / 撤销回归断言。
@@ -271,7 +290,7 @@ py -3 build_exe.py --zip                    :: 额外压成 zip（本版起 Rele
 ### 2.0.2
 
 **修：全新安装时「整理要求」没有生成默认文件**。文档让人直接编辑
-`%APPDATA%\NameCat\llm_instruction.txt`，但过去只有点过「保存要求」才会创建它 ——
+`%APPDATA%\FileCat\llm_instruction.txt`，但过去只有点过「保存要求」才会创建它 ——
 照着文档去找的人会发现文件根本不存在。现在打开「供应商配置」页就会把内置默认要求
 （4 行）落盘，用户改过了则原样保留、绝不覆盖。
 
@@ -360,4 +379,4 @@ py -3 build_exe.py --zip                    :: 额外压成 zip（本版起 Rele
 
 ---
 
-NameCat 2.1.1 · 引擎 Rust · 界面基于 PySide6 6.10 · 设计稿见 `docs/design-preview/boards.png`
+FileCat 3.0.0 · 引擎 Rust · 界面基于 PySide6 6.10 · 设计稿见 `docs/design-preview/boards.png`

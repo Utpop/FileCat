@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn build_info_carries_app_name() {
         let info = build_info();
-        assert_eq!(info.app_name, "NameCat");
+        assert_eq!(info.app_name, "FileCat");
         // 进度表里只放已完成换壳的模块名，且不能有重复
         let mut names = info.modules.to_vec();
         names.sort_unstable();

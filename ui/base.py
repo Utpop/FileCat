@@ -23,7 +23,8 @@ for _p in (PROJECT, VENDOR):
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 
-from PySide6.QtCore import QByteArray, QPointF, QRectF, QSize, Qt, Signal  # noqa: E402
+from PySide6.QtCore import (QAbstractAnimation, QByteArray, QPointF, QRectF, QSize,  # noqa: E402
+                            Qt, QTimer, QVariantAnimation, Signal)
 from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetrics,  # noqa: E402
                            QGuiApplication, QIcon, QPainter, QPen, QPixmap, QPolygonF)
 from PySide6.QtSvg import QSvgRenderer  # noqa: E402
@@ -791,3 +792,197 @@ class NavButton(QAbstractButton):
         p.drawText(QRectF(left, 0, self.width() - left - 6, self.height()),
                    Qt.AlignLeft | Qt.AlignVCenter, self._txt)
         p.end()
+
+
+# --------------------------------------------------------------------------- #
+# 公共状态槽：工作台 / 文件提取页共用同一套逻辑（不各写一份）
+# --------------------------------------------------------------------------- #
+
+class StatusSlot(QWidget):
+    """工具栏右侧的状态胶囊：空闲 / 忙 / 完成 / 四类语气消息。
+
+    这套状态机原先只长在 WorkspacePage 里，文件提取页用了 NoticeBar 横幅，
+    两边反馈方式不一致（见 §11.7）。现在抽成公共控件：
+      · idle(n)     灰字「已扫描 N 项」，无胶囊底
+      · busy()      蓝字「正在扫描…」+ 旋转刷新图标 + 蓝胶囊底
+      · done(n)     绿勾 + 深灰字 + 绿胶囊底，5 秒后动画淡回 idle
+      · message()   success/warn/error/info 语气色文字 + 同色胶囊底，不自动淡出
+      · 文本超 420px 省略，全文进 tooltip；宽度只按全文算一次，避免反馈塌缩
+
+    `count_provider` 返回当前条目数，由调用方注入（工作台读 bundle.items()，
+    提取页读 bundle.items），控件本身不认识任何业务对象。
+    """
+
+    GRAY = C["t3"]
+    DARK = C["t2"]
+
+    def __init__(self, count_provider=None, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ScanStatus")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setFixedHeight(22)
+        self._count_provider = count_provider or (lambda: 0)
+        lay = hbox(self, (10, 0, 10, 0), 5)
+        self.icon = QLabel()
+        self.icon.setFixedSize(13, 13)
+        self.icon.hide()
+        lay.addWidget(self.icon, 0, Qt.AlignVCenter)
+        self.label = Label("已扫描 0 项", 11, 400, self.GRAY)
+        lay.addWidget(self.label, 0, Qt.AlignVCenter)
+        self._spin_base = None
+        self._spin_timer = None
+        self._fade_timer = None
+        self._fade_anim = None
+        self._spin_angle = 0
+
+    # ---- 内部原语 ----
+    def _bg(self, color):
+        self.setStyleSheet("#ScanStatus{background:%s;border-radius:11px;}" % color)
+
+    def _text(self, text):
+        fm = QFontMetrics(self.label.font())
+        full = str(text or "")
+        if fm.horizontalAdvance(full) > 420:
+            self.label.setText(fm.elidedText(full, Qt.ElideRight, 420))
+            self.label.setToolTip(full)
+        else:
+            self.label.setText(full)
+            self.label.setToolTip("")
+        self.label.setFixedWidth(min(fm.horizontalAdvance(full) + 2, 422))
+
+    def _fg(self, color):
+        self.label.setStyleSheet("color:%s;background:transparent;" % color)
+
+    def _count(self):
+        try:
+            return int(self._count_provider() or 0)
+        except Exception:
+            return 0
+
+    # ---- 四态 ----
+    def idle(self):
+        self._spin_stop()
+        self._fade_stop()
+        self.icon.hide()
+        self._text("已扫描 %d 项" % self._count())
+        self._fg(self.GRAY)
+        self._bg("transparent")
+
+    def busy(self, text="正在扫描…"):
+        self._fade_stop()
+        self._spin_base = svg_pixmap("refresh", C["info"], 13)
+        self.icon.setPixmap(self._spin_base)
+        self.icon.setGraphicsEffect(None)
+        self.icon.show()
+        self._text(text)
+        self._fg(C["info"])
+        self._bg(C["info_bg"])
+        self._spin_start()
+
+    def done(self, text=None):
+        self._spin_stop()
+        self.icon.setPixmap(svg_pixmap("check", C["ok"], 13))
+        self.icon.setGraphicsEffect(None)
+        self.icon.show()
+        self._text(text if text is not None else "已扫描 %d 项" % self._count())
+        self._fg(self.DARK)
+        self._bg(C["ok_bg"])
+        self._fade_schedule()
+
+    def message(self, text, tone="info"):
+        """语气消息：与三态互斥，新消息顶掉旧状态；错误/结果不自动淡出。"""
+        self._spin_stop()
+        self._fade_stop()
+        ic, fg, bg = {
+            "success": ("check", C["ok"], C["ok_bg"]),
+            "warn": ("info", C["warn"], C["warn_bg"]),
+            "error": ("x", C["err"], C["err_bg"]),
+            "info": ("info", C["info"], C["info_bg"]),
+        }.get(tone, ("info", C["info"], C["info_bg"]))
+        self.icon.setPixmap(svg_pixmap(ic, fg, 13))
+        self.icon.setGraphicsEffect(None)
+        self.icon.show()
+        flat = " · ".join(line.strip() for line in str(text or "").splitlines()
+                          if line.strip())
+        self._text(flat)
+        self._fg(fg)
+        self._bg(bg)
+
+    # ---- 旋转图标 ----
+    def _spin_start(self):
+        if self._spin_timer is not None:
+            return
+        self._spin_angle = 0
+        timer = QTimer(self)
+        timer.setInterval(40)
+        timer.timeout.connect(self._spin_tick)
+        self._spin_timer = timer
+        timer.start()
+
+    def _spin_tick(self):
+        self._spin_angle = (self._spin_angle + 30) % 360
+        if self._spin_base is not None:
+            self.icon.setPixmap(self._spin_base.transformed(
+                QTransform().rotate(self._spin_angle), Qt.SmoothTransformation))
+
+    def _spin_stop(self):
+        timer = self._spin_timer
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+            self._spin_timer = None
+
+    # ---- 5 秒淡出 ----
+    def _fade_schedule(self):
+        self._fade_stop()
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(self._fade_start)
+        self._fade_timer = timer
+        timer.start(5000)
+
+    def _fade_start(self):
+        self._fade_timer = None
+        icon_eff = QGraphicsOpacityEffect(self.icon)
+        self.icon.setGraphicsEffect(icon_eff)
+        anim = QVariantAnimation(self)
+        anim.setDuration(450)
+        anim.setStartValue(1.0)
+        anim.setEndValue(0.0)
+        dark, gray = QColor(self.DARK), QColor(self.GRAY)
+        bg = QColor(C["ok_bg"])
+
+        def mix(c1, c2, v):
+            return QColor(int(c1.red() + (c2.red() - c1.red()) * v),
+                          int(c1.green() + (c2.green() - c1.green()) * v),
+                          int(c1.blue() + (c2.blue() - c1.blue()) * v)).name()
+
+        def step(v):
+            t = float(v)
+            icon_eff.setOpacity(t)
+            self._fg(mix(dark, gray, t))
+            self.setStyleSheet(
+                "#ScanStatus{background:rgba(%d,%d,%d,%.2f);border-radius:11px;}"
+                % (bg.red(), bg.green(), bg.blue(), t))
+
+        def finished():
+            if self._fade_anim is not anim:
+                return          # 中途被新扫描打断，别覆盖新状态
+            self._fade_anim = None
+            self.idle()
+
+        anim.valueChanged.connect(step)
+        anim.finished.connect(finished)
+        self._fade_anim = anim
+        anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+
+    def _fade_stop(self):
+        timer = self._fade_timer
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+            self._fade_timer = None
+        anim = self._fade_anim
+        if anim is not None:
+            self._fade_anim = None   # 先摘引用，finished 里不会回写灰色默认态
+            anim.stop()

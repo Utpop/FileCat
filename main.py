@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-NameCat 入口：图形界面 + 命令行共用同一个文件。
+FileCat 入口：图形界面 + 命令行共用同一个文件。
 
 用法：
     python main.py                      # 打开图形界面
@@ -56,11 +56,11 @@ def _engine_hint() -> str:
         return (
             "引擎扩展没加载：%s\n"
             "\n"
-            "NameCat 的引擎（engine/）已经是 Rust 实现，源码运行前要先构建一次：\n"
+            "FileCat 的引擎（engine/）已经是 Rust 实现，源码运行前要先构建一次：\n"
             "    py -3 rust_build.py\n"
             "\n"
             "需要 Rust 工具链与 maturin；构建产物装到 _vendor/namecat_py.*.pyd。\n"
-            "不想装 Rust 就直接用 Releases 里的 NameCat.exe（已内含引擎）。"
+            "不想装 Rust 就直接用 Releases 里的 FileCat.exe（已内含引擎）。"
             % exc
         )
     return ""

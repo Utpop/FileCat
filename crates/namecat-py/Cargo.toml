@@ -14,5 +14,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 namecat-core.workspace = true
+namecat-extract-core.workspace = true
+serde.workspace = true
 pyo3.workspace = true
 serde_json.workspace = true

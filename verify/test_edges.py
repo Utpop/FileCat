@@ -40,6 +40,7 @@ if ROOT not in sys.path:
 SANDBOX = os.path.join(ROOT, "_verify_edges")
 os.environ["NAMECAT_LOG_DIR"] = os.path.join(SANDBOX, "_logs")
 
+from engine import APP_NAME                              # noqa: E402
 from namecat_py import common as C                      # noqa: E402
 from namecat_py import llm as L                         # noqa: E402
 from namecat_py import ops                              # noqa: E402
@@ -386,7 +387,7 @@ def test_undo_and_logs():
     if os.path.isdir(logs):
         shutil.rmtree(logs, ignore_errors=True)
     os.makedirs(logs, exist_ok=True)
-    good = {"app": "NameCat", "time": "2026-11-01 10:00:00", "root": box,
+    good = {"app": APP_NAME, "time": "2026-11-01 10:00:00", "root": box,
             "pairs": [{"old": "a", "new": "b"}]}
     with open(os.path.join(logs, "rename_aaaaaaaa_20261101_100000_abcdef.json"),
               "w", encoding="utf-8") as fh:

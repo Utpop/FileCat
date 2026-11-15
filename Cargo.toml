@@ -1,4 +1,4 @@
-# NameCat Rust 引擎：cargo workspace 根
+# FileCat Rust 引擎：cargo workspace 根
 #
 # 布局（对应 docs/DESIGN_RUST_ENGINE.md §2.1）：
 #   crates/namecat-core  纯逻辑，零 Python 依赖，cargo test 可独立跑
@@ -9,10 +9,10 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/namecat-core", "crates/namecat-py"]
+members = ["crates/namecat-core", "crates/namecat-extract-core", "crates/namecat-py"]
 
 [workspace.package]
-version = "2.1.1"
+version = "3.0.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -21,6 +21,8 @@ license = "MIT"
 pyo3 = { version = "0.29.3", features = ["extension-module"] }
 thiserror = "2"
 namecat-core = { path = "crates/namecat-core" }
+# 文件批量提取引擎：独立 crate，与原重命名 core 无业务依赖
+namecat-extract-core = { path = "crates/namecat-extract-core" }
 # 正则：必须用回溯式引擎。regex crate 没有回引用/环视，用户写的 \1、(?=) 会直接报错
 fancy-regex = "0.20"
 serde = { version = "1", features = ["derive"] }

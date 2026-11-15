@@ -130,3 +130,79 @@ def llm_test_task(cfg) -> BaseTask:
 def llm_fetch_models_task(cfg) -> BaseTask:
     """拉取模型列表（联网，必须放后台线程）。"""
     return BaseTask(lambda progress=None: A.llm_fetch_models(cfg))
+
+
+# --------------------------------------------------------------------------- #
+# FileCat 文件提取引擎的任务（独立 Adapter，与上面原重命名任务平行）
+# --------------------------------------------------------------------------- #
+
+def extract_plan_task(state) -> BaseTask:
+    """扫描 + 生成提取计划（后台线程，只读文件系统）。"""
+    from adapters import extract_adapter as EA
+    return BaseTask(EA.build_plan, state)
+
+
+def extract_execute_task(bundle, dry_run: bool, task_id: str) -> BaseTask:
+    """模拟 / 实际执行（后台线程；Rust 侧会释放 GIL，进度经信号回主线程）。"""
+    from adapters import extract_adapter as EA
+    return BaseTask(EA.execute, bundle, dry_run, task_id)
+
+
+def extract_undo_task(log_path: str = "") -> BaseTask:
+    """撤销最新一次提取；给了日志路径就撤销指定那份。"""
+    from adapters import extract_adapter as EA
+    if log_path:
+        return BaseTask(EA.undo_path, log_path)
+    return BaseTask(EA.undo_latest)
+
+
+def extract_logs_task() -> BaseTask:
+    from adapters import extract_adapter as EA
+    return BaseTask(lambda progress=None: EA.list_logs())
+
+
+def extract_csv_task(path: str, items) -> BaseTask:
+    from adapters import extract_adapter as EA
+    return BaseTask(lambda progress=None: EA.export_csv(path, list(items or [])))
+
+
+def history_all_task(root: str) -> BaseTask:
+    """「执行记录」页：同时读取重命名与文件提取两类日志，归并成同构的行。
+
+    两类日志放在不同目录、不同 schema、由不同引擎写，界面在这里统一读，
+    但各自仍走自己的 Adapter（不互相 import）。
+    """
+    from adapters import engine_adapter as A
+    from adapters import extract_adapter as EA
+
+    def _read(progress=None):
+        rows = []
+        for r in A.logs(root or ""):
+            r = dict(r)
+            r["record_type"] = "rename"
+            rows.append(r)
+        import os
+        wanted = os.path.normcase(os.path.abspath(root)) if root else ""
+        for r in EA.list_logs():
+            if wanted and os.path.normcase(os.path.abspath(str(r.get("root") or ""))) != wanted:
+                continue  # 目录筛选对两类日志同样生效
+            r = dict(r)
+            r["record_type"] = "extract"
+            # 与重命名日志对齐的字段：pairs 用日志里的 entries 数量占位，
+            # 撤销按钮按 record_type 分发，不需要真的 pairs 内容。
+            r["pairs"] = [None] * int(r.get("count") or 0)
+            r["summary"] = {}
+            r["exec"] = {}
+            rows.append(r)
+        rows.sort(key=lambda x: str(x.get("time") or ""), reverse=True)
+        return rows
+
+    return BaseTask(_read)
+
+
+def history_extract_undo_task(log_path: str = "") -> BaseTask:
+    """撤销某一份文件提取日志（走提取 Adapter，与重命名撤销隔离）。"""
+    from adapters import extract_adapter as EA
+    if log_path:
+        return BaseTask(EA.undo_path, log_path)
+    return BaseTask(EA.undo_latest)

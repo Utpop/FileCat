@@ -26,6 +26,7 @@ ROOT = os.path.dirname(HERE)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+from engine import APP_NAME                    # noqa: E402
 from namecat_py import common as C            # noqa: E402
 from namecat_py import llm as L               # noqa: E402
 from namecat_py import ops                    # noqa: E402
@@ -1037,7 +1038,7 @@ def test_e2e():
     os.makedirs(legacy_dir)
     legacy = os.path.join(legacy_dir, "rename_20260101_120000_abc123.json")
     with open(legacy, "w", encoding="utf-8") as fh:
-        json.dump({"app": "NameCat", "schema": C.LOG_SCHEMA, "time": "2026-01-01 12:00:00",
+        json.dump({"app": APP_NAME, "schema": C.LOG_SCHEMA, "time": "2026-01-01 12:00:00",
                    "root": box3, "pairs": [{"old": os.path.join(box3, "a"),
                                             "new": os.path.join(box3, "b")}]},
                   fh, ensure_ascii=False)

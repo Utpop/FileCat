@@ -17,12 +17,13 @@ from PySide6.QtCore import (QAbstractAnimation, QPoint, QRect, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPen, QPolygonF, QTransform
 from PySide6.QtWidgets import (QDialog, QFileDialog, QFrame, QGraphicsOpacityEffect,
                                QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu,
-                               QMessageBox, QPushButton, QSizePolicy, QVBoxLayout,
+                               QMessageBox, QProgressBar, QPushButton, QSizePolicy, QVBoxLayout,
                                QWidget)
 
 from adapters import engine_adapter as A
 from namecat_py import rules as R
 from ui.base import (C, F, R_XS, Badge, Button, Card, Check, Clickable, Chip,
+                      StatusSlot,
                      Elided, EmptyState, Label, PageHead, Select, Strip,
                      fit_scroll_content, grid_row, hbox, hline, icon, scroll_area,
                      spacer, svg_pixmap, vbox)
@@ -845,7 +846,7 @@ class WorkspacePage(QWidget):
         self.btn_load.clicked.connect(lambda: self.load_preset_requested.emit())
         self.btn_save = Button("保存为预设", "save")
         self.btn_save.clicked.connect(lambda: self.save_preset_requested.emit())
-        return PageHead("重命名工作台",
+        return PageHead("文件重命名",
                         "扫描 → 编排规则链 → 预览校验 → 执行落盘，全程可撤销",
                         [self.btn_load, self.btn_save])
 
@@ -890,23 +891,40 @@ class WorkspacePage(QWidget):
         self.adv_holder = adv_holder
         row2.addWidget(adv_holder, 0)
 
-        row2.addWidget(spacer(), 1)
-        # 扫描状态并入扫描栏（唯一显示处，底部统计条另有汇总）：
-        # 未扫描 = 灰字「已扫描 0 项」→ 扫描中 = 蓝字 + 转动图标 →
-        # 扫完 = 绿勾 + 深灰字，5 秒后淡回灰色默认态。
-        # 状态一变就套同色系的胶囊浅底（ok_bg / info_bg / err_bg…），
-        # 让「这里有新消息」一眼可见；灰色默认态无底色。
-        self.scan_status = QWidget()
-        self.scan_status.setObjectName("ScanStatus")
-        self.scan_status.setAttribute(Qt.WA_StyledBackground, True)
-        self.scan_status.setFixedHeight(22)
-        sst = hbox(self.scan_status, (10, 0, 10, 0), 5)
-        self.scan_icon = QLabel()
-        self.scan_icon.setFixedSize(13, 13)
-        self.scan_icon.hide()
-        sst.addWidget(self.scan_icon, 0, Qt.AlignVCenter)
-        self.count_label = Label("已扫描 0 项", 11, 400, SCAN_GRAY)
-        sst.addWidget(self.count_label, 0, Qt.AlignVCenter)
+        # 进度条：放在「高级筛选」与右侧「已扫描 N 项」胶囊之间的空白里。
+        #
+        # 布局上**只保留一个 stretch 项**（progress_wrap），由它承担原来
+        # spacer() 「把胶囊推到最右」的职责；进度条与百分比是 wrap 内部的
+        # 固定宽控件，只做 show/hide。若像初版那样让进度条和 spacer 各占
+        # 一个 stretch，两者会平分剩余空间，窄窗口下会挤压右侧胶囊。
+        # 进度条固定 220px，不会被压成 0 或与胶囊折叠到同一处。
+        self.progress_wrap = QWidget()
+        self.progress_wrap.setFixedHeight(22)
+        pw = hbox(self.progress_wrap, (0, 0, 12, 0), 8)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setFixedSize(220, 6)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setRange(0, 0)   # 默认不确定模式（扫描只有目录名回调）
+        self.progress_bar.setStyleSheet(
+            "QProgressBar{background:%s;border:0;border-radius:3px;}"
+            "QProgressBar::chunk{background:%s;border-radius:3px;}"
+            % (C["s2"], C["brand"]))
+        pw.addWidget(self.progress_bar, 0, Qt.AlignVCenter)
+        self.progress_label = Label("", 11, 400, C["t2"])
+        self.progress_label.setFixedWidth(96)
+        pw.addWidget(self.progress_label, 0, Qt.AlignVCenter)
+        pw.addStretch(1)                   # 剩余留白仍留在本容器内
+        self.progress_bar.hide()
+        self.progress_label.hide()
+        row2.addWidget(self.progress_wrap, 1)   # 唯一的 stretch 项，胶囊继续贴右
+        # 扫描状态槽：与文件提取页共用 ui/base.py 的 StatusSlot（同一份逻辑）。
+        # count_provider 注入「当前清单条数」，控件不认识 bundle。
+        self.scan_status = StatusSlot(
+            count_provider=lambda: len(self.bundle.items())
+            if (self.bundle is not None and self.bundle.has_scan) else 0)
+        # 兼容老调用点：状态槽内部的 icon / label 仍按原名暴露
+        self.scan_icon = self.scan_status.icon
+        self.count_label = self.scan_status.label
         row2.addWidget(self.scan_status, 0, Qt.AlignVCenter)
         lay.addLayout(row2)
         return card
@@ -1507,165 +1525,44 @@ class WorkspacePage(QWidget):
                 ("%d 项 · 已勾选 %d 项" % (n, self.rows_table.checked_count()))
                 if plan_ready else ("%d 项 · 尚未生成预览" % n))
 
-    # ---- 扫描栏右侧的状态机（颜色见 SCAN_GRAY / SCAN_DARK） ----
+    # ---- 扫描栏状态机：统一委托给 ui/base.py 的 StatusSlot ----
+    # 文件提取页用同一个类，两边反馈方式不会再分叉。保留原有方法名，
+    # 使 scan()/generate_plan()/... 的调用点一行都不用改。
     def _scan_status_bg(self, color):
-        """状态槽的胶囊底色；「transparent」= 灰色默认态无胶囊。"""
-        self.scan_status.setStyleSheet(
-            "#ScanStatus{background:%s;border-radius:11px;}" % color)
+        self.scan_status._bg(color)
 
     def _scan_status_text(self, text):
-        """状态槽的单行文本：超过 420px 用省略号截断，全文进 tooltip。
-
-        手动定宽而不是用 Elided——省略后的 sizeHint 会反过来把布局挤窄，
-        宽度越算越小（反馈塌缩），这里宽度只由全文算一次，稳定。
-        """
-        fm = QFontMetrics(self.count_label.font())
-        full = str(text or "")
-        if fm.horizontalAdvance(full) > 420:
-            self.count_label.setText(fm.elidedText(full, Qt.ElideRight, 420))
-            self.count_label.setToolTip(full)
-        else:
-            self.count_label.setText(full)
-            self.count_label.setToolTip("")
-        self.count_label.setFixedWidth(min(fm.horizontalAdvance(full) + 2, 422))
+        self.scan_status._text(text)
 
     def _scan_status_idle(self):
-        """灰色默认态：未扫描时是「已扫描 0 项」，扫完淡出后回到这里（数字保留）。"""
-        self._scan_spin_stop()
-        self._scan_fade_stop()
-        self.scan_icon.hide()
-        n = len(self.bundle.items()) if (
-            self.bundle is not None and self.bundle.has_scan) else 0
-        self._scan_status_text("已扫描 %d 项" % n)
-        self.count_label.setStyleSheet(
-            "color:%s;background:transparent;" % SCAN_GRAY)
-        self._scan_status_bg("transparent")
+        self.scan_status.idle()
 
     def _scan_status_busy(self):
-        """扫描中：蓝字「正在扫描…」+ 转动的刷新图标，蓝胶囊底。"""
-        self._scan_fade_stop()
-        self._spin_base = svg_pixmap("refresh", C["info"], 13)
-        self.scan_icon.setPixmap(self._spin_base)
-        self.scan_icon.setGraphicsEffect(None)
-        self.scan_icon.show()
-        self._scan_status_text("正在扫描…")
-        self.count_label.setStyleSheet(
-            "color:%s;background:transparent;" % C["info"])
-        self._scan_status_bg(C["info_bg"])
-        self._scan_spin_start()
+        self.scan_status.busy("正在扫描…")
 
     def _scan_status_done(self):
-        """扫完：绿勾 + 深灰字 + 绿胶囊底，挂一个 5 秒后淡回灰色的定时器。"""
-        self._scan_spin_stop()
-        self.scan_icon.setPixmap(svg_pixmap("check", C["ok"], 13))
-        self.scan_icon.setGraphicsEffect(None)
-        self.scan_icon.show()
-        n = len(self.bundle.items()) if self.bundle is not None else 0
-        self._scan_status_text("已扫描 %d 项" % n)
-        self.count_label.setStyleSheet(
-            "color:%s;background:transparent;" % SCAN_DARK)
-        self._scan_status_bg(C["ok_bg"])
-        self._scan_fade_schedule()
+        self.scan_status.done()
 
     def _scan_status_message(self, text, tone):
-        """警告 / 错误 / 结果类消息：同样走扫描栏右侧，语气色文字 + 同色胶囊底。
-
-        与扫描三态互斥：新消息顶掉旧状态，下一次扫描/淡出再恢复正常三态。
-        消息不自动淡出——错误和结果需要停留到用户下一个动作。
-        """
-        self._scan_spin_stop()
-        self._scan_fade_stop()
-        ic, fg, bg = {
-            "success": ("check", C["ok"], C["ok_bg"]),
-            "warn": ("info", C["warn"], C["warn_bg"]),
-            "error": ("x", C["err"], C["err_bg"]),
-            "info": ("info", C["info"], C["info_bg"]),
-        }.get(tone, ("info", C["info"], C["info_bg"]))
-        self.scan_icon.setPixmap(svg_pixmap(ic, fg, 13))
-        self.scan_icon.setGraphicsEffect(None)
-        self.scan_icon.show()
-        self._scan_status_text(text)
-        self.count_label.setStyleSheet(
-            "color:%s;background:transparent;" % fg)
-        self._scan_status_bg(bg)
+        self.scan_status.message(text, tone)
 
     def _scan_spin_start(self):
-        if getattr(self, "_spin_timer", None) is not None:
-            return
-        self._spin_angle = 0
-        timer = QTimer(self)
-        timer.setInterval(40)
-        timer.timeout.connect(self._scan_spin_tick)
-        self._spin_timer = timer
-        timer.start()
+        self.scan_status._spin_start()
 
     def _scan_spin_tick(self):
-        self._spin_angle = (self._spin_angle + 30) % 360
-        self.scan_icon.setPixmap(self._spin_base.transformed(
-            QTransform().rotate(self._spin_angle), Qt.SmoothTransformation))
+        self.scan_status._spin_tick()
 
     def _scan_spin_stop(self):
-        timer = getattr(self, "_spin_timer", None)
-        if timer is not None:
-            timer.stop()
-            timer.deleteLater()
-            self._spin_timer = None
+        self.scan_status._spin_stop()
 
     def _scan_fade_schedule(self):
-        self._scan_fade_stop()
-        timer = QTimer(self)
-        timer.setSingleShot(True)
-        timer.timeout.connect(self._scan_fade_start)
-        self._fade_timer = timer
-        timer.start(5000)
+        self.scan_status._fade_schedule()
 
     def _scan_fade_start(self):
-        self._fade_timer = None
-        icon_eff = QGraphicsOpacityEffect(self.scan_icon)
-        self.scan_icon.setGraphicsEffect(icon_eff)
-        anim = QVariantAnimation(self)
-        anim.setDuration(450)
-        anim.setStartValue(1.0)
-        anim.setEndValue(0.0)
-        dark, gray = QColor(SCAN_DARK), QColor(SCAN_GRAY)
-        bg = QColor(C["ok_bg"])
-
-        def mix(c1, c2, t):
-            return QColor(int(c1.red() + (c2.red() - c1.red()) * t),
-                          int(c1.green() + (c2.green() - c1.green()) * t),
-                          int(c1.blue() + (c2.blue() - c1.blue()) * t)).name()
-
-        def step(v):
-            t = float(v)
-            icon_eff.setOpacity(t)
-            self.count_label.setStyleSheet(
-                "color:%s;background:transparent;" % mix(dark, gray, t))
-            # 胶囊底色同步淡出（QSS 用 rgba 表达透明度）
-            self.scan_status.setStyleSheet(
-                "#ScanStatus{background:rgba(%d,%d,%d,%.2f);border-radius:11px;}"
-                % (bg.red(), bg.green(), bg.blue(), t))
-
-        def done():
-            if getattr(self, "_fade_anim", None) is not anim:
-                return          # 中途被新扫描打断（_scan_fade_stop 已置空），别覆盖新状态
-            self._fade_anim = None
-            self._scan_status_idle()
-
-        anim.valueChanged.connect(step)
-        anim.finished.connect(done)
-        self._fade_anim = anim
-        anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+        self.scan_status._fade_start()
 
     def _scan_fade_stop(self):
-        timer = getattr(self, "_fade_timer", None)
-        if timer is not None:
-            timer.stop()
-            timer.deleteLater()
-            self._fade_timer = None
-        anim = getattr(self, "_fade_anim", None)
-        if anim is not None:
-            self._fade_anim = None   # 先摘引用，finished 里就不会回写灰色默认态
-            anim.stop()
+        self.scan_status._fade_stop()
 
     def _pulse_add_rule(self):
         """「添加规则」按钮 pulse 一次（约 1.5s）：底色与描边向品牌蓝鼓一下再收回。
@@ -1948,12 +1845,45 @@ class WorkspacePage(QWidget):
             self.scan()
 
     # ================= 流程 =================
+    def _progress_reset(self, label=""):
+        """开始一个后台任务：进度条置 0（或不确定模式），控件显示出来。"""
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setValue(0)
+        self.progress_label.setText(label)
+        self.progress_bar.show()
+        self.progress_label.show()
+
+    def _progress_hide(self):
+        """任务结束：收起进度条，空白还给工具栏。胶囊状态不受影响。"""
+        self.progress_bar.hide()
+        self.progress_label.hide()
+        self.progress_label.setText("")
+
+    def _on_progress(self, cur, total, text):
+        """BaseTask 的进度信号（扫描是 (0,0,text)，算名/执行是 (cur,total,text)）。"""
+        if not self.progress_bar.isVisible():
+            return
+        if total and int(total) > 0:
+            self.progress_bar.setRange(0, int(total))
+            self.progress_bar.setValue(max(0, min(int(cur), int(total))))
+            pct = int(cur) * 100 // int(total)
+            self.progress_label.setText("%d / %d" % (int(cur), int(total)))
+        else:
+            # 无总数：不确定模式，文字给当前阶段
+            self.progress_bar.setRange(0, 0)
+            self.progress_label.setText(str(text or "")[:8])
+        self.progress_label.setToolTip(str(text or ""))
+
     def _busy_set(self, busy, text=""):
         self._busy = busy
         self.btn_scan.setEnabled(not busy)
         self.btn_scan.setText("处理中…" if busy else "开始扫描")
         if text:
             self.preview_hint.setText(text)
+        if busy:
+            self._progress_reset(text)
+        else:
+            self._progress_hide()
         self._refresh_summary()
 
     def _collect(self, need_rules=False) -> bool:
@@ -1993,6 +1923,7 @@ class WorkspacePage(QWidget):
         task = W.scan_task(self.state)
         task.signals.done.connect(self._scan_done)
         task.signals.failed.connect(self._failed)
+        task.signals.progress.connect(self._on_progress)
         task.signals.finished.connect(self._task_finished)
         self.runner.submit(task)
 
@@ -2063,6 +1994,7 @@ class WorkspacePage(QWidget):
         task = W.build_plan_task(self.bundle, self.rules, self._client())
         task.signals.done.connect(self._plan_done)
         task.signals.failed.connect(self._failed)
+        task.signals.progress.connect(self._on_progress)
         task.signals.finished.connect(self._task_finished)
         self.runner.submit(task)
 
@@ -2159,7 +2091,7 @@ class WorkspacePage(QWidget):
     def export_csv(self):
         if self.bundle is None or not self.bundle.has_plan:
             return
-        start = os.path.join(self.state.root, "NameCat_plan.csv")
+        start = os.path.join(self.state.root, "FileCat_plan.csv")
         path, _ = QFileDialog.getSaveFileName(self, "导出预览为 CSV", start, "CSV 文件 (*.csv)")
         if not path:
             return
@@ -2191,6 +2123,7 @@ class WorkspacePage(QWidget):
         task = W.apply_task(self.bundle, self.rules, self._client())
         task.signals.done.connect(self._apply_done)
         task.signals.failed.connect(self._failed)
+        task.signals.progress.connect(self._on_progress)
         task.signals.finished.connect(self._task_finished)
         self.runner.submit(task)
 

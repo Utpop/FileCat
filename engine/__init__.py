@@ -20,8 +20,8 @@ import os
 import shutil
 import sys
 
-APP_NAME = "NameCat"
-APP_VER = "2.1.1"
+APP_NAME = "FileCat"
+APP_VER = "3.0.0"
 LOG_DIR_NAME = "_rename_logs"
 # 撤销日志统一存放的文件夹名（放在**程序目录**下，与被改名的目标目录无关）
 BACKUP_DIR_NAME = "Name_backup"
@@ -33,10 +33,10 @@ MAX_LOGS_TOTAL = 200
 TEMP_PREFIX = "__nk_tmp_"
 
 # 用户数据目录：`%APPDATA%\<DATA_DIR_NAME>`。
-# 旧版本叫 NameKit，改名后仍要把用户已经存在的配置读出来 —— 首次访问时
-# 把旧目录里"目标不存在"的文件复制过来（只复制，不删除旧数据）。
-DATA_DIR_NAME = "NameCat"
-LEGACY_DATA_DIRS = ("NameKit",)
+# 旧版本先后叫 NameKit / NameCat，改名后仍要把用户已经存在的配置读出来 ——
+# 首次访问时把旧目录里"目标不存在"的文件复制过来（只复制，不删除旧数据）。
+DATA_DIR_NAME = "FileCat"
+LEGACY_DATA_DIRS = ("NameCat", "NameKit")
 
 
 def appdata_base() -> str:

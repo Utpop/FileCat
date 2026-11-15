@@ -1,17 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-build_exe.py —— 把 NameCat 打成 Windows 单文件 exe。
+build_exe.py —— 把 FileCat 打成 Windows 单文件 exe。
 
     py -3 build_exe.py              # 打包
-    py -3 build_exe.py --zip        # 打包后额外压成 dist/NameCat-<版本>-win64.zip
+    py -3 build_exe.py --zip        # 打包后额外压成 dist/FileCat-<版本>-win64.zip
     py -3 build_exe.py --no-verify  # 跳过打包后的自检（改脚本时省时间用）
 
 打包结束会自动跑一次自检（沙箱里改名 → 撤销），不通过就报错退出：单文件窗口
 程序出问题时没有任何可见输出，必须在这里拦住。
 
 产物：
-    dist/NameCat.exe                单文件，无控制台（窗口程序）
-    dist/NameCat-<版本>-win64.zip   可选，Release 传这个
+    dist/FileCat.exe                单文件，无控制台（窗口程序）
+    dist/FileCat-<版本>-win64.zip   可选，Release 传这个
 
 四条约定，改脚本前请先读：
 
@@ -33,11 +33,11 @@ build_exe.py —— 把 NameCat 打成 Windows 单文件 exe。
 4. **瘦身靠生成 `.spec`，不是命令行参数**。PyInstaller 只能 `--exclude-module`
    （管 Python 模块），没有"排除某个二进制"的开关，而体积大头恰恰是二进制
    （`opengl32sw.dll` 一个就 7.5 MB）。所以每次构建都由 `write_spec()` 生成
-   `NameCat.spec`，在里面按 `DROP_BINARIES` 过滤 `a.binaries` —— 清单与理由都在
+   `FileCat.spec`，在里面按 `DROP_BINARIES` 过滤 `a.binaries` —— 清单与理由都在
    那个常量旁边，别在 spec 里手改（每次打包都会覆盖）。41.2 MB → 29.8 MB。
 
 窗口程序（`--windowed`）不会带控制台，`Traceback` 无处可去 —— 真出错时看
-ui/app.py 的 _fatal：它会写 `%TEMP%/NameCat_startup_error.log` 并弹一个系统框。
+ui/app.py 的 _fatal：它会写 `%TEMP%/FileCat_startup_error.log` 并弹一个系统框。
 """
 
 from __future__ import annotations
@@ -274,7 +274,7 @@ def build(allow_stale: bool = False, keep_opengl: bool = False) -> str:
 def verify_exe(exe: str) -> None:
     """打包后自检：在沙箱里真跑一次 CLI 改名 + 撤销。
 
-    为什么不用 `NameCat.exe rules` 看输出：窗口程序默认没有控制台，`print`
+    为什么不用 `FileCat.exe rules` 看输出：窗口程序默认没有控制台，`print`
     被 engine/cli.py 的流包装器悄悄丢掉，成功了也是"什么都没发生"，看不出对错。
     所以这里只**看文件效果** —— 改名成功说明 Rust 引擎在冻结环境里真的加载了。
 
@@ -352,23 +352,23 @@ def pack_zip(exe: str) -> str:
             zf.write(readme, "README.md")
         zf.writestr(
             "使用说明.txt",
-            "NameCat %s（Windows 64 位，单文件绿色版）\r\n"
+            "%s %s（Windows 64 位，单文件绿色版）\r\n"
             "\r\n"
-            "1. 解压到任意文件夹，双击 NameCat.exe 即可运行，无需安装 Python。\r\n"
+            "1. 解压到任意文件夹，双击 %s.exe 即可运行，无需安装 Python。\r\n"
             "2. 首次运行若被 Windows SmartScreen 拦截，选「更多信息」→「仍要运行」。\r\n"
             "   若弹出 Could not create temporary directory!：这是单文件模式的解包步骤失败，\r\n"
             "   说明当前账号的 %%TEMP%% 不可写。把 TEMP / TMP 指到可写目录再启动即可\r\n"
             "   （命令行：set TEMP=%%LOCALAPPDATA%%\\Temp 然后重新双击）。\r\n"
             "3. 命令行用法（在解压目录里打开终端）：\r\n"
-            "     NameCat.exe rules                 列出全部 28 种规则\r\n"
-            "     NameCat.exe presets               列出内置预设\r\n"
-            "     NameCat.exe preview <目录> --rule \"template={n}\" --width 3\r\n"
-            "     NameCat.exe rename  <目录> --rule \"replace=_:- \" --apply\r\n"
-            "     NameCat.exe undo    <目录>\r\n"
-            "     NameCat.exe leftovers <目录>      列出执行被中断后遗留的临时名文件\r\n"
+            "     %s.exe rules                 列出全部 28 种规则\r\n"
+            "     %s.exe presets               列出内置预设\r\n"
+            "     %s.exe preview <目录> --rule \"template={n}\" --width 3\r\n"
+            "     %s.exe rename  <目录> --rule \"replace=_:- \" --apply\r\n"
+            "     %s.exe undo    <目录>\r\n"
+            "     %s.exe leftovers <目录>      列出执行被中断后遗留的临时名文件\r\n"
             "   默认只预览，加 --apply 才真的落盘；改名后可用 undo 整批还原。\r\n"
-            "4. 卸载：删掉这个文件夹即可（配置与预设在 %%APPDATA%%\\NameCat，撤销日志在程序目录\\Name_backup）。\r\n"
-            % APP_VER,
+            "4. 卸载：删掉这个文件夹即可（配置与预设在 %%APPDATA%%\\FileCat，重命名撤销日志在程序目录\\Name_backup，提取撤销日志在程序目录\\Extract\\Rollback_Log）。\r\n"
+            % ((APP_NAME, APP_VER) + (APP_NAME,) * 7),
         )
     print("[build] 压缩包：%s（%.1f MB）" % (out, os.path.getsize(out) / 1024 / 1024))
     return out

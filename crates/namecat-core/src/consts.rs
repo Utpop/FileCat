@@ -4,7 +4,7 @@
 //! Python 壳与 Rust 侧读到的必须是同一套值（`verify/rust_check.py` 会比对）。
 
 /// 应用名（界面标题、日志文件名前缀都用它）。
-pub const APP_NAME: &str = "NameCat";
+pub const APP_NAME: &str = "FileCat";
 
 /// 旧版撤销日志目录名（历史遗留，只读兼容用）。
 pub const LOG_DIR_NAME: &str = "_rename_logs";
@@ -25,10 +25,10 @@ pub const MAX_LOGS_TOTAL: i64 = 200;
 pub const TEMP_PREFIX: &str = "__nk_tmp_";
 
 /// 用户数据目录名：`%APPDATA%\<DATA_DIR_NAME>`。
-pub const DATA_DIR_NAME: &str = "NameCat";
+pub const DATA_DIR_NAME: &str = "FileCat";
 
 /// 旧版数据目录名，首次访问时把其中缺失的文件补到新目录。
-pub const LEGACY_DATA_DIRS: &[&str] = &["NameKit"];
+pub const LEGACY_DATA_DIRS: &[&str] = &["NameCat", "NameKit"];
 
 // 状态码：沿用 BatchRenamer 的 5 种，界面与日志共用一套文案
 pub const ST_OK: &str = "ok";

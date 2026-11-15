@@ -59,6 +59,16 @@ ROOT_CONSTS = ["APP_NAME", "APP_VER", "LOG_DIR_NAME", "BACKUP_DIR_NAME", "LOG_DI
 # Rust 化之前固化的期望符号清单（入库，只读）
 MANIFEST = os.path.join(HERE, "engine_symbols.json")
 
+# FileCat 文件提取引擎：独立 crate、独立子模块，不进上面 12 模块的期望集，
+# 但也要有自己的符号闸门，避免漏挂函数直到点开页面才发现。
+EXTRACT_SYMBOLS = [
+    "SCHEMA", "INTERNAL_DIR_NAME", "ROLLBACK_DIR_NAME", "BACKUP_SUBDIR",
+    "MODES", "POLICIES", "STATUSES",
+    "program_root_hint", "rollback_dir", "parse_list",
+    "build_plan", "execute", "stop_task", "undo_latest", "undo_path",
+    "list_logs", "export_csv", "plan_stats", "read_log",
+]
+
 
 def rust_symbols(module: types.ModuleType) -> list[str]:
     declared = getattr(module, "__all__", None)
@@ -95,7 +105,7 @@ def main(argv=None) -> int:
         print("✗ 未知模块：%s（可用：%s）" % (", ".join(unknown), ", ".join(MODULES)))
         return 2
 
-    print("NameCat Rust 引擎 · 符号对齐检查")
+    print("FileCat Rust 引擎 · 符号对齐检查")
     manifest = load_manifest()
     print("期望集来源：%s（Rust 化之前固化，只读）" % os.path.relpath(MANIFEST, ROOT))
     print("=" * 78)
@@ -155,6 +165,19 @@ def main(argv=None) -> int:
         failed.append("<submodules>")
     else:
         print("✓ 全部 %d 个子模块可独立 import" % len(MODULES))
+
+    # FileCat 提取引擎：独立子模块，符号单独核对（不混入 193 个重命名符号的基准）
+    try:
+        extract = importlib.import_module("namecat_py.extract")
+        missing_extract = [s for s in EXTRACT_SYMBOLS if not hasattr(extract, s)]
+        if missing_extract:
+            print("✗ namecat_py.extract 缺符号：%s" % ", ".join(missing_extract))
+            failed.append("extract")
+        else:
+            print("✓ namecat_py.extract 独立引擎符号齐全（%d 项）" % len(EXTRACT_SYMBOLS))
+    except ImportError as exc:
+        print("✗ namecat_py.extract 无法 import：%s" % exc)
+        failed.append("extract")
 
     print("=" * 78)
     if failed:

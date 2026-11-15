@@ -32,19 +32,19 @@ def _fatal(message: str) -> None:
     """
     log_path = ""
     try:
-        log_path = os.path.join(tempfile.gettempdir(), "NameCat_startup_error.log")
+        log_path = os.path.join(tempfile.gettempdir(), "FileCat_startup_error.log")
         with open(log_path, "w", encoding="utf-8") as fh:
             fh.write(message)
     except OSError:
         pass
-    head = "NameCat 启动失败。"
+    head = "FileCat 启动失败。"
     tail = ("\n\n详细信息已写入：\n%s\n\n"
             "常见原因：依赖目录 _vendor 缺失、Python 版本不受支持（需要 3.10+），"
             "或解释器里没有装 PySide6。" % log_path) if log_path else ""
     try:
         import ctypes
         ctypes.windll.user32.MessageBoxW(0, head + tail + "\n\n" + message[-800:],
-                                         "NameCat", 0x10)
+                                         "FileCat", 0x10)
     except Exception:
         print(head + tail, file=sys.stderr)
 
@@ -87,7 +87,7 @@ def _run(argv: Optional[List[str]] = None) -> int:
 
     win = MainWindow(prefs.load())
     # 显式 showNormal 并抬到前台：应对"快捷方式被设成最小化"这类情况。
-    # 注意：这救不了以 SW_HIDE 启动的进程（见 NameCat.vbs 里 sh.Run 的注释）。
+    # 注意：这救不了以 SW_HIDE 启动的进程（见 FileCat.vbs 里 sh.Run 的注释）。
     win.showNormal()
     win.raise_()
     win.activateWindow()

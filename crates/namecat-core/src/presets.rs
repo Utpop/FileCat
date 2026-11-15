@@ -309,7 +309,7 @@ mod tests {
             note: "备注".to_string(),
         };
         let data = preset.to_dict();
-        assert_eq!(data["app"], Value::String("NameCat".into()));
+        assert_eq!(data["app"], Value::String(crate::consts::APP_NAME.into()));
         assert_eq!(data["version"], Value::String(crate::APP_VER.into()));
         let back = Preset::from_dict(&data);
         assert_eq!(back.name, preset.name);

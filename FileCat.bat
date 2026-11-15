@@ -1,9 +1,9 @@
 @echo off
 setlocal enabledelayedexpansion
 
-rem NameCat console launcher.
+rem FileCat console launcher.
 rem Double-click to start. Keeps the console open so real errors stay visible.
-rem Prefer NameCat.vbs if you do not want a console window.
+rem Prefer FileCat.vbs if you do not want a console window.
 rem
 rem ASCII only on purpose: cmd.exe codepage handling of non-ASCII literals in
 rem .bat files is unreliable, and a broken launcher is worse than a plain one.
@@ -34,8 +34,8 @@ if not defined PY for %%I in (python.exe) do if not "%%~$PATH:I"=="" set "PY=%%~
 
 if not defined PY goto nopython
 
-echo [NameCat] Python: !PY!
-echo [NameCat] Starting the GUI. Close the window to exit.
+echo [FileCat] Python: !PY!
+echo [FileCat] Starting the GUI. Close the window to exit.
 echo.
 
 "!PY!" "%~dp0main.py" %*
@@ -46,9 +46,9 @@ exit /b 0
 
 :nopython
 echo.
-echo [NameCat] No Python interpreter found.
+echo [FileCat] No Python interpreter found.
 echo.
-echo NameCat needs Python 3.12 or newer.
+echo FileCat needs Python 3.12 or newer.
 echo Install it, then double-click this file again, or put python.exe on PATH.
 echo.
 pause
@@ -56,6 +56,6 @@ exit /b 3
 
 :failed
 echo.
-echo [NameCat] Exit code !RC! -- the error above is the real one, please report it.
+echo [FileCat] Exit code !RC! -- the error above is the real one, please report it.
 pause
 exit /b !RC!

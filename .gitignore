@@ -28,6 +28,9 @@ _verify_shots/
 _rename_logs/
 Name_backup/
 
+# 文件提取撤销日志与覆盖备份（固定 <程序根>/Extract/Rollback_Log/）
+Extract/
+
 # 界面偏好落盘的兜底副本（runtime state，含本机绝对路径）
 gui_state.json
 

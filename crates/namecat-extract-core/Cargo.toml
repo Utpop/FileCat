@@ -1,0 +1,22 @@
+[package]
+name = "namecat-extract-core"
+description = "FileCat 文件批量提取核心引擎（纯 Rust，独立，无 Python/GUI 依赖）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
+[dev-dependencies]
+serde_json.workspace = true

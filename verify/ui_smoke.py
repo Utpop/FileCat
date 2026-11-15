@@ -39,6 +39,11 @@ from ui.window import MainWindow  # noqa: E402
 FAILS = []
 
 
+def _ck(cond):
+    if not cond:
+        raise AssertionError("断言失败")
+
+
 def step(name, fn):
     try:
         fn()
@@ -102,6 +107,25 @@ def advanced():
 
 
 step("AdvancedDialog 构造/应用", advanced)
+
+print("== 4a. 扫描对象下拉 ==")
+
+
+def only_combo():
+    # 原样式：无前置标签、宽 148、原文案；默认「图片 + 视频」(media)
+    assert ws.state.only == "media", ws.state.only
+    opts = [v for v, _ in ws.only._opts]
+    assert "all" not in opts, "「文件 + 文件夹」不应出现在下拉里：%s" % opts
+    assert dict(ws.only._opts)["file"] == "仅文件"
+    assert dict(ws.only._opts)["media"] == "图片 + 视频"
+    assert ws.only.width() == 148, ws.only.width()
+    # 旧预设里的 kinds 命中 all 时回落到默认档 media
+    st = A.FormState()
+    st.apply_scan_dict({"kinds": ["file", "dir", "image", "video"]})
+    assert st.only == "media", st.only
+
+
+step("扫描对象下拉（原样式 / 无 all / 默认仅文件）", only_combo)
 
 print("== 4b. 预览卡表头的排序方式下拉 ==")
 
@@ -169,6 +193,32 @@ ws.scan(plan_after=True)
 wait_until(lambda: ws.bundle is not None and ws.bundle.has_plan)
 print("   items:", len(ws.bundle.items()), "stats:", ws.bundle.stats())
 
+print("== 6b. 工具栏进度条与状态胶囊共存 ==")
+
+
+def progress_bar():
+    # 进度条与「已扫描 N 项」胶囊都在工具栏第二行；空闲时进度条隐藏，
+    # 且 progress_wrap 是唯一 stretch 项，胶囊不会被挤压或与进度条折叠到一起。
+    assert hasattr(ws, "progress_bar") and hasattr(ws, "progress_wrap")
+    assert not ws.progress_bar.isVisible(), "空闲时进度条应隐藏"
+    assert ws.scan_status.isVisible(), "状态胶囊应始终可见"
+    # busy 态：进度条显示、胶囊仍在、且两者不重叠
+    ws._busy_set(True, "自检中…")
+    app.processEvents()
+    assert ws.progress_bar.isVisible(), "忙时进度条应显示"
+    assert ws.scan_status.isVisible(), "忙时状态胶囊不应被挤掉"
+    bar_right = ws.progress_bar.mapToGlobal(ws.progress_bar.rect().topRight()).x()
+    cap_left = ws.scan_status.mapToGlobal(ws.scan_status.rect().topLeft()).x()
+    assert bar_right <= cap_left, "进度条与状态胶囊重叠：%d > %d" % (bar_right, cap_left)
+    ws._on_progress(2, 4, "算名")
+    assert ws.progress_bar.value() == 2 and ws.progress_bar.maximum() == 4
+    ws._busy_set(False)
+    app.processEvents()
+    assert not ws.progress_bar.isVisible(), "任务结束后进度条应收起"
+
+
+step("进度条 / 状态胶囊布局", progress_bar)
+
 print("== 7. 勾选排除 ==")
 
 
@@ -197,6 +247,10 @@ QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
 # 让「按磁盘现状重扫」拿到完整清单（plan.csv 也在目录里，两侧都会算上）。
 ws.state.only_match = ""
 ws.state.exclude_exts = ""
+# 这段断言要求「预览 = 目录里全部文件」，用全文件档验证；默认档是
+# 「图片 + 视频」，会合理地不显示 plan.csv / req.txt 这类非媒体文件。
+ws.state.only = "file"
+ws.only.set_value("file")
 ws.confirm_apply()
 # 执行完会自动按磁盘现状重扫：等重扫结束，再断言预览与目录一致。
 wait_until(lambda: not ws._scan_outdated and not ws._rescan_after_apply
@@ -210,7 +264,7 @@ step("执行后自动重扫预览", lambda: None)
 print("   目录：", sorted(os.listdir(tmpdir))[:6])
 
 print("== 10. 执行记录 + 撤销 ==")
-w._goto(2)
+w._goto(2)  # 执行记录页（文件提取页占 index 1）
 w.page_history.set_root(tmpdir)
 wait_until(lambda: bool(w.page_history._rows), 6000)
 print("   日志条数：", len(w.page_history._rows))
@@ -254,8 +308,25 @@ def save_preset():
 
 
 step("保存预设", save_preset)
-w.page_presets.reload()
-print("   预设行数：", len(w.page_presets._rows))
+from ui.pages.presets import PresetDialog
+dlg = PresetDialog(w)
+dlg.reload()
+print("   预设对话框行数：", len(dlg._rows))
+step("预设对话框含编辑/删除操作", lambda: (
+    _ck(hasattr(dlg, "_edit") and hasattr(dlg, "_delete")),
+    _ck(len(dlg._rows) >= 4)))
+step("预设对话框 应用信号", lambda: dlg._apply(dlg._rows[0]))
+dlg.close()
+# 「加载预设」按钮走的是弹窗，不再是主窗口的一页
+step("加载预设按钮弹出对话框", lambda: (
+    _ck(hasattr(w, "open_preset_dialog")),
+    _ck(w.stack.count() == 4),
+    _ck(not hasattr(w, "page_presets"))))
+called = []
+w.open_preset_dialog = lambda: called.append(1)
+ws.load_preset_requested.emit()
+app.processEvents()
+step("加载预设信号连到弹窗", lambda: _ck(called == [1]))
 step("删除预设", lambda: A.delete_preset(os.path.join(tmpdir, "自检预设.json")))
 
 print("== 12. LLM 页 ==")
@@ -267,7 +338,7 @@ step("客户端", lambda: A.llm_client())
 
 
 def llm_page():
-    w._goto(3)
+    w._goto(3)  # 供应商配置页
     app.processEvents()
     w.page_llm.reload(True)
     w.page_llm.overrides()

@@ -101,7 +101,7 @@ def rules_of(R):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="NameCat 引擎基准")
+    parser = argparse.ArgumentParser(description="FileCat 引擎基准")
     parser.add_argument("-n", "--files", type=int, default=2000)
     parser.add_argument("--keep", action="store_true", help="保留造出来的文件")
     parser.add_argument("--reuse", action="store_true",

@@ -27,6 +27,7 @@
 
 mod py_common;
 mod py_context;
+mod py_extract;
 mod py_llm;
 mod py_net;
 mod py_presets;
@@ -70,6 +71,9 @@ const SUBMODULES: &[(&str, &str, &str, Option<Attach>)] = &[
     ("llm", "engine/llm.py", "LLM 客户端与建议解析", Some(py_llm::attach)),
     ("provider", "engine/provider.py", "供应商配置与连通性检测", Some(py_provider::attach)),
     ("presets", "engine/presets.py", "预设的读写与内置清单", Some(py_presets::attach)),
+    // FileCat 文件批量提取引擎：独立 Rust core（namecat-extract-core），
+    // 与上面 12 个重命名子模块无业务依赖，也不进 rename 的符号闸门。
+    ("extract", "crates/namecat-extract-core", "文件批量提取引擎（独立 core）", Some(py_extract::attach)),
 ];
 
 /// 构建信息：给自检用，不承诺语义。
