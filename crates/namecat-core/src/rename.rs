@@ -131,19 +131,21 @@ pub fn describe_io_error(exc: &std::io::Error) -> String {
 /// Python 的 `repr(str)`：CPython 拼 OSError 文案时用的是 `%R`，
 /// 所以路径里的反斜杠会变成两个（`C:////a////b`）。要跟它逐字一致只能用同一套转义。
 fn py_repr(text: &str) -> String {
+    // CPython 的 repr 优先用单引号；仅当字符串含 ' 且不含 " 时改用双引号。
+    let quote = if text.contains('\'') && !text.contains('"') { '"' } else { '\'' };
     let mut out = String::with_capacity(text.len() + 2);
-    out.push('\'');
+    out.push(quote);
     for c in text.chars() {
         match c {
             '\\' => out.push_str("\\\\"),
-            '\'' => out.push_str("\\'"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            c if c == quote => { out.push('\\'); out.push(c); }
             _ => out.push(c),
         }
     }
-    out.push('\'');
+    out.push(quote);
     out
 }
 

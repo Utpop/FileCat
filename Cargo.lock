@@ -299,7 +299,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "namecat-core"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "chrono",
  "crc32fast",
@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "namecat-extract-core"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "chrono",
  "serde",
@@ -328,7 +328,7 @@ dependencies = [
 
 [[package]]
 name = "namecat-py"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "namecat-core",
  "namecat-extract-core",

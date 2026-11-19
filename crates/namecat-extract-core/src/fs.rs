@@ -250,8 +250,26 @@ pub fn last_error() -> u32 {
 }
 
 /// 安全判断 `child` 是否位于 `root` 之内（按规范化后的组件比较，不做字符串前缀）。
+///
+/// `Path::starts_with` 是词法比较，不解析 `..`；外部传入的伪造计划可以写
+/// `<root>\sub\..\..\outside.txt` 骗过校验，再由系统解析 `..` 越界操作。
+/// 这里显式拒绝任何含 ParentDir 的路径，并消解 `.` 后再比较。
 pub fn is_within(child: &Path, root: &Path) -> bool {
-    child.starts_with(root)
+    use std::path::Component;
+    if child.components().any(|c| c == Component::ParentDir)
+        || root.components().any(|c| c == Component::ParentDir)
+    {
+        return false;
+    }
+    let clean: PathBuf = child
+        .components()
+        .filter(|c| *c != Component::CurDir)
+        .collect();
+    let base: PathBuf = root
+        .components()
+        .filter(|c| *c != Component::CurDir)
+        .collect();
+    clean.starts_with(&base)
 }
 
 /// `canonicalize` 在 Windows 上返回 `\\?\C:\...`（verbatim）前缀，与 Python

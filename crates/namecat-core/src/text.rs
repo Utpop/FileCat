@@ -34,7 +34,11 @@ pub fn title(text: &str) -> String {
         } else {
             out.extend(ch.to_uppercase());
         }
-        prev_cased = ch.is_alphabetic();
+        // Python 的 cased 判定：汉字 / 假名等无大小写属性的字母不算 cased，
+        // 否则「中文abc」会被当成词中而丢失大写（与 Python str.title() 不一致）。
+        // Unicode 的 titlecase 字符（如 ǅ）同时也是 uppercase/lowercase 之一，
+        // 这里用稳定的 is_lowercase/is_uppercase 即可覆盖 Python 的 cased 判定。
+        prev_cased = ch.is_lowercase() || ch.is_uppercase();
     }
     out
 }
@@ -101,6 +105,8 @@ mod tests {
         assert_eq!(title("don't stop"), "Don'T Stop");
         assert_eq!(title("abc123def"), "Abc123Def");
         assert_eq!(title("中文名字"), "中文名字");
+        assert_eq!(title("中文abc"), "中文Abc");
+        assert_eq!(title("ABC中文DEF"), "Abc中文Def");
         assert_eq!(title(""), "");
         assert_eq!(title("HELLO"), "Hello");
     }

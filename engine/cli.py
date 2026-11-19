@@ -410,19 +410,22 @@ def cmd_undo(args) -> int:
         print("没有找到撤销日志")
         return 1
     if args.list:
+        bad = 0
         for path in logs:
             try:
                 data = C.load_log(path)
             except (OSError, ValueError):
                 print("%s（无法读取）" % path)
+                bad += 1
                 continue
             if not isinstance(data, dict):
                 print("%s（格式不认识）" % path)
+                bad += 1
                 continue
             print("%s  %s  %s  共 %d 项"
                   % (path, data.get("time", ""), data.get("root", ""),
                      len(C.log_pairs(data))))
-        return 0
+        return 0 if bad == 0 else 1
     latest = logs[-1]
     print("撤销：%s" % latest)
     try:

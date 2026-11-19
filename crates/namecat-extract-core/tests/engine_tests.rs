@@ -539,10 +539,36 @@ fn forged_plan_with_out_of_root_target_is_rejected() {
     let stop = e::StopFlag::new();
     assert!(e::execute::execute(&o, &plan, false, &stop, &Silent).is_err(),
             "越界目标必须被拒绝，不能触发任意路径删除");
+    // 含 `..` 的路径虽以 root 开头，但系统解析后越界，同样必须拒绝
+    let mut plan3 = e::plan::build_plan(&o).unwrap();
+    plan3.items[0].target = root.join("sub").join("..").join("..").join("outside.txt");
+    assert!(e::execute::execute(&o, &plan3, false, &stop, &Silent).is_err(),
+            "含 .. 的越界路径必须被拒绝");
     // 冲突策略与选项不一致也要拒绝
     let mut plan2 = e::plan::build_plan(&o).unwrap();
     plan2.conflict = e::ConflictPolicy::Overwrite;
     assert!(e::execute::execute(&o, &plan2, false, &stop, &Silent).is_err());
+}
+
+#[test]
+fn one_level_overwrite_nested_same_name_keeps_both_files() {
+    // a/x.txt 自身要上移，不能被 a/b/x.txt 当成可覆盖的盘上文件；
+    // 否则 b/x.txt 覆盖掉 a/x.txt 后，后者执行时报源不存在，
+    // 两份最终只剩一份，撤销也还原不回来。
+    let s = Sandbox::new("onelevel_overwrite_nested");
+    let root = s.root();
+    write(&root, "a/x.txt", "OUTER");
+    write(&root, "a/b/x.txt", "INNER");
+    let mut o = opts(&s, e::ExtractMode::OneLevel, e::ConflictPolicy::Overwrite);
+    o.overwrite_confirmed = true;
+    let plan = e::plan::build_plan(&o).unwrap();
+    let stop = e::StopFlag::new();
+    let res = e::execute::execute(&o, &plan, false, &stop, &Silent).unwrap();
+    assert_eq!(res.failed, 0, "不应有源不存在的失败：{:?}", res.errors);
+    assert!(root.join("x.txt").is_file(), "外层文件应上移到根");
+    assert!(root.join("a").join("x (2).txt").is_file()
+            || root.join("a").join("x.txt").is_file(),
+            "内层文件应单独占一个目标，不覆盖外层");
 }
 
 #[test]

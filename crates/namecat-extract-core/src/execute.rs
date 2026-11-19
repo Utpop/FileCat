@@ -257,9 +257,15 @@ fn real_execute(
                 // 逐条追加检查点（O(1) append + flush）。写失败等价于「这之后的
                 // 搬移都无法撤销」，绝不能继续搬后续文件：立即置停止标志，让循环
                 // 在下一项之前收尾，并把错误显著写进日志/结果。
+                // 检查点写失败时 append 提前返回，entry 没进内存日志；这里补推一次，
+                // 保证 finalize 至少能把它写进正式日志，文件仍可撤销。
+                let cp_entry = entry.clone();
                 if let Err(e) = rollback::checkpoint(
                     &mut pending, &mut log, entry, &cleaned, &errors,
                 ) {
+                    if !log.entries.iter().any(|x| x.source == cp_entry.source && x.target == cp_entry.target) {
+                        log.entries.push(cp_entry);
+                    }
                     errors.push(format!(
                         "严重：撤销日志检查点写入失败，已停止后续搬运以免产生不可撤销文件：{e}"
                     ));
@@ -327,11 +333,13 @@ fn real_execute(
     drop(pending);
 
     // ---- 最终日志：原子替换；失败必须明确告知（数据与备份仍在，可人工恢复） ----
+    // 先把本轮全部错误挂回 result，finalize_log 才能把它们写进 log.errors；
+    // 否则日志的 errors 字段会被空数组覆盖，崩溃恢复丢失上下文。
+    result.errors = errors;
     if let Err(e) = rollback::finalize_log(&log_path, &mut log, &result, &cleaned) {
-        errors.push(format!("最终撤销日志写入失败：{e}（文件与备份仍保留）"));
+        result.errors.push(format!("最终撤销日志写入失败：{e}（文件与备份仍保留）"));
     }
     result.items = items;
-    result.errors = errors;
     throttle.emit(result.completed, "执行结束", true);
     Ok(result)
 }

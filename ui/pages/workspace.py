@@ -2015,6 +2015,11 @@ class WorkspacePage(QWidget):
 
     def _failed(self, message):
         self._busy_set(False)
+        # 自动预览失败也要清掉悬挂标志，否则下一次无关任务结束时会误触发一次
+        # 多余的 generate_plan；并给出与「扫描后立即出预览」语义一致的提示。
+        if self._plan_after_scan:
+            self._plan_after_scan = False
+            message = "自动预览失败：%s；请检查规则或连接后重试" % message
         self._refresh_is_apply = False
         # 重扫失败时保留 _scan_outdated（清单仍然不可用），但别让
         # _task_finished 再排一次队、也别无限重试；用户点预览会重新触发重扫。

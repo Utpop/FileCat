@@ -309,7 +309,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):  # noqa: N802
         self._remember()
-        for page in (self.page_ws, self.page_extract, self.page_history):
+        for page in (self.page_ws, self.page_extract, self.page_history, self.page_llm):
             shutdown = getattr(page, "shutdown", None)
             if callable(shutdown):
                 shutdown()

@@ -26,7 +26,8 @@ for _p in (PROJECT, VENDOR):
 from PySide6.QtCore import (QAbstractAnimation, QByteArray, QPointF, QRectF, QSize,  # noqa: E402
                             Qt, QTimer, QVariantAnimation, Signal)
 from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetrics,  # noqa: E402
-                           QGuiApplication, QIcon, QPainter, QPen, QPixmap, QPolygonF)
+                           QGuiApplication, QIcon, QPainter, QPen, QPixmap, QPolygonF,
+                           QTransform)
 from PySide6.QtSvg import QSvgRenderer  # noqa: E402
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QFrame, QGridLayout,  # noqa: E402
                                QHBoxLayout, QLabel, QMainWindow, QPushButton,

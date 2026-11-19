@@ -51,9 +51,10 @@ pub fn validate_for_execute(
     if norm(&plan_root) != norm(&root) {
         return Err(Error::Invalid("计划对应的目标文件夹与当前选项不一致，请重新扫描预览"));
     }
-    // 用组件比较而非字符串前缀：C:\data 不能匹配 C:\data2\...
+    // 用组件比较而非字符串前缀：C:\data 不能匹配 C:\data2\...；
+    // fs::is_within 还会拒绝含 `..` 的越界路径（伪造计划校验）。
     let within = |p: &Path| -> bool {
-        p.starts_with(&root)
+        crate::fs::is_within(p, &root)
     };
     let mut overwrite_targets: HashSet<String> = HashSet::new();
     for it in &plan.items {
@@ -96,7 +97,10 @@ pub fn plan_looks_executed(plan: &ExtractPlan) -> bool {
     if actionable.is_empty() {
         return false;
     }
-    actionable.iter().all(|it| {
+    // 只要存在「源已消失、目标已出现」的项就说明这批至少被部分执行过；
+    // 用 all() 会让部分搬移（停止/失败后）蒙混过关，再执行会生成第二份日志，
+    // 把第一批文件的撤销记录挤到 undo_latest 够不着的位置。
+    actionable.iter().any(|it| {
         !crate::fs::file_exists(&it.source) && crate::fs::file_exists(&it.target)
     })
 }
@@ -106,6 +110,19 @@ pub fn plan_from_scanned(opts: &ExtractOptions, root: &Path, scanned: &ScanOutpu
     // 目标占用表：扫描时盘上已有的文件（含被排除的、根目录已就位的），
     // 加上本批次已经规划好的目标。大小写规范化，Windows 语义。
     let mut occupied: HashSet<String> = scanned.existing_files.iter().cloned().collect();
+    // 本批次将要搬走的文件位置。覆盖策略只能覆盖「盘上常驻、不会被搬走」的文件；
+    // 若目标恰好是另一个待搬源（one_level 嵌套同名：a/b/x.txt 的目标是 a/x.txt，
+    // 而 a/x.txt 自己也要上移），把它当可覆盖文件会先备份删掉它，导致那一项
+    // 执行时报「源不存在」，最终两份文件只剩一份、撤销也还原不回来。
+    // 这些位置在规划时仍被占用（源文件还在盘上），
+    // 所以保留在 occupied 里以触发冲突处理；但不能走「覆盖」分支——覆盖一个
+    // 即将被别的规则搬走的文件没有意义，还会让那一项执行时报源不存在/被跳过。
+    // 因此它们只在覆盖判定时被排除，最终走自动改名。
+    let occupied_by_moving: HashSet<String> = scanned
+        .files
+        .iter()
+        .map(|f| norm(&f.source))
+        .collect();
     // 本批次已经分配出去的目标。与 occupied 分开：occupied 含盘上原有文件，
     // 覆盖策略下第一个源允许覆盖盘上原文件，但后续源不能再指向同一位置。
     let mut planned_targets: HashSet<String> = HashSet::new();
@@ -149,7 +166,8 @@ pub fn plan_from_scanned(opts: &ExtractOptions, root: &Path, scanned: &ScanOutpu
             // 同一个 target 会互相打架（实测会把旧文件搬错位置）。因此后续源一律
             // 走自动改名兜底，保证每个目标在本批次内唯一。
             let overwrite_first = opts.conflict == ConflictPolicy::Overwrite
-                && !planned_targets.contains(&key);
+                && !planned_targets.contains(&key)
+                && !occupied_by_moving.contains(&key);
             match opts.conflict {
                 ConflictPolicy::Skip => {
                     status = FileStatus::Skip;
